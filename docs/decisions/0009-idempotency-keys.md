@@ -51,8 +51,8 @@ credential is recorded on the row and compared in plain text rather than hashed:
   never reads it, and a retry under a new key is a new request: after a rotation, read the resource
   with GET to learn whether the original request ran before sending it again.
 
-A route can pass `canonicalize` where two spellings mean one request, such as unordered batch
-recipients.
+A route can pass `canonicalize` where two spellings mean one request: unordered batch recipients,
+decimal amounts (`"1.0"` and `"1"`) on the money routes, and an empty batch `options` object.
 
 **Order.** Authentication → project context → `requirePermissions` → Allowed Operations →
 validation → **`authorize`** → **this step** → replay from the domain row → admission → handler.
@@ -61,15 +61,24 @@ validation → **`authorize`** → **this step** → replay from the domain row 
   act on every resource the request names, in tenant scope, and hands what it loaded to the
   handler. It runs before this step, so a replay passes exactly the checks a new request passes,
   and nothing after this step checks access. The step refuses to run (500) on a route without an
-  earlier `authorize` or `authorizeNone(reason)`. The step carries its reason, so the route
-  inventory that comes with the routes (PR 3) can pin every `authorizeNone`.
+  earlier `authorize` or `authorizeNone(reason)`; the stable route inventory pins every
+  `authorizeNone` with its reason.
 - **Access, never state.** `authorize` answers "may this caller act on these resources?" (an API
-  key bound to the wallet, a schedule in the caller's project), read fresh where the handler reads
-  fresh. State ("the wallet is active", "the schedule is active") stays in the handler. A state
+  key bound to the wallet, a schedule in the caller's project). A wallet-scoped key's bindings come
+  from authentication, which reads them in its one uncached statement on every request (HOO-2048),
+  deactivated wallets kept; `authorize` checks them synchronously against `getAuth(c)` and never
+  re-reads them, so the replay of a request whose wallet was deactivated since is not refused.
+  Every id the request names (a counterparty account, a ramp deposit, a custody wallet) is
+  looked up in the project here, whatever its status, so a wrong id is never stored as a 404 for
+  24 hours. State ("the wallet is active", "the schedule is active") stays in the handler. A state
   check before this step would refuse the retry of a request that succeeded (the schedule is
   active because the first activate worked) instead of replaying its stored answer. A credential
   narrowed since the original request gets 403; one narrowed in a way that still covers the
   resource gets the replay.
+- **State refusals are stored.** A refusal the handler raises from state (an inactive wallet, an
+  archived counterparty or counterparty account) is a 404 stored under the key for 24 hours, on
+  purpose: the same request gets the same answer, and a request that should run now uses a new
+  key.
 - **Validation runs first** because a 400 is never stored: an invalid request claims nothing.
 - A replay is not admitted again, because it isn't a new movement. Replay from the domain row also
   runs before admission, so a request that already ran is answered from its row even when
@@ -84,6 +93,11 @@ validation → **`authorize`** → **this step** → replay from the domain row 
 and a guard against concurrent duplicates. It does no foreign dedupe. The route's domain row is the
 recovery point:
 
+- it is written under a **credential-bound record key** (`getIdempotencyRecordKey`: SHA-256 over
+  the scope, organization, project, credential and key, as `deriveProviderRequestId` derives), never
+  the raw client key. Past the key record's 24 hours the row is what answers a retry, and a replay
+  only ever goes to the original credential, so another credential in the project sending the
+  same key runs as a new request;
 - it is written under its own unique key before anything is signed or sent, the signature and
   blockhash window are saved before broadcast, and the outcome is recorded before this step saves
   the response;
@@ -104,6 +118,51 @@ point finds its row and never signs or sends twice. Unlike Brandur's design the 
 on the domain row, not the key row, because domain rows outlive the key's 24 hours and the
 reconciler works from them.
 
+A transfer batch commits its row and its recipients before any chunk, and each chunk commits its
+transfer row and recipient links before it broadcasts. So a recipient still pending with no
+transfer row was never sent. When a takeover or a retry past the 24 hours finds its batch still
+`processing`, the record finder fails those unsent recipients and recomputes the batch before it
+answers; the pending-transfers job does the same for a batch over an hour old that no one retries.
+Neither resumes or re-sends: a recipient with a transfer row is settled from that row as before.
+
+Recurring payments carve this out: their cron resumes and completes a half-finished row (an
+`activating`, `canceling` or `resuming` schedule, or a collection in flight) from the signature
+its attempt recorded; it does not fail the row. A replay of activate, cancel, resume or collect
+finds the attempt its key claimed and returns the schedule as it stands now, which may still be
+mid-transition (the cron finishes it); clients poll GET. The cron does not recover an `updating`
+schedule, so an in-flight update attempt is never an answer: stored, it would hold the key on
+`updating` for 24 hours. A same-key PATCH retry that finds its attempt in flight gets 409
+`IDEMPOTENCY_KEY_IN_FLIGHT` with `Retry-After` (unstored) until the schedule goes stale, then runs
+the handler, which resumes the attempt under the same key; a settled update attempt replays its
+answer. Every keyed cancel, resume and PATCH that is answered leaves an attempt under its own key,
+so its retry past 24 hours never runs again over a later change: a no-op (a cancel of a canceled
+schedule, a resume of an active one, a PATCH that changes nothing) writes a confirmed attempt that
+changes nothing. An activate needs no no-op attempt: a schedule never returns to
+`pending_activation`, so a retry cannot activate again. A request never finishes another key's
+in-flight attempt silently: activate, cancel, resume and collect refuse it as in flight (409,
+unstored), the claim rolls back, and the cron finishes it; a
+PATCH, which the cron does not recover, may finish it, and writes its own confirmed attempt in the
+same transaction as the finalize, so the update never lands without the record its retry is
+answered from.
+
+Custody wallet creation (`POST /v1/wallets`) moves no money but creates a provider wallet before its
+row, so it has no row to write first and stays `serverErrors: "store"`. A keyed create derives a
+request id from the key, scoped by organization, project and credential (the raw key never reaches
+a provider), and records it with the fingerprint on the `custody_wallets` row (migration 0136). A
+retry the key cannot answer (a takeover, or past 24 hours) is answered from that row by
+`replayFromRecord` without calling the provider; another request on the same key is 422. That
+replay returns the wallet as it is now (its current label and status), not as the first response
+showed it. A crash
+between the provider call and the row is covered only where the provider dedupes on the id:
+Privy (`privy-idempotency-key` plus a derived `external_id`, looked up only when the create does
+not answer with the wallet) and Coinbase CDP
+(`X-Idempotency-Key` plus an account name seeded by the id). Fireblocks, Turnkey, Para, DFNS,
+IBM Digital Asset Haven, Anchorage and Utila get no id from our clients, so that window can still
+leave a second, unreferenced wallet there: a crash after the provider created the wallet and before
+the row was written leaves an orphan provider wallet, and the retry creates another. The follow-up
+is an intent row written before the provider call, which the retry finds and completes instead of
+calling the provider again.
+
 A lapsed lease alone does not mean the request died: a database blip longer than the lease (a
 Cloud SQL failover during a slow custody sign) makes renewals fail while the request still runs.
 So a claim whose lease lapsed without being released counts as live until `claimed_at` plus the
@@ -114,8 +173,8 @@ crash, a failed write of the outcome, a request past the renewal cap).
 A dead claim is taken over only on a route that recovers from its domain row: a `rerun` route, or a
 `store` route declared `idempotent({ ..., recovery: "record" })` because it mounts
 `replayFromRecord`, which answers the takeover from the row. Both steps carry markers
-(`declaredIdempotencyRecovery`, `declaresRecordReplay`) so the route inventory that comes with the
-routes can pin that every route mounting `replayFromRecord` sets it. On any other route nothing
+(`declaredIdempotencyRecovery`, `declaresRecordReplay`), and the route inventory pins that every
+route mounting `replayFromRecord` sets it. On any other route nothing
 would stop the retry from running the handler twice, so it gets the terminal 409
 `IDEMPOTENCY_KEY_OUTCOME_UNKNOWN` with no `Retry-After`: the caller reads the resource with GET to
 see whether it ran, then sends again with a new key. That answer is not stored and the claim is
@@ -137,10 +196,24 @@ records its outcome after all, which is then replayed). A released claim (a refu
 | Domain row exists, different fingerprint (`replayFromRecord`) | No | 422 `IDEMPOTENCY_KEY_REUSED` |
 | Domain row exists, same fingerprint (`replayFromRecord`) | Yes | The row's answer + `Idempotent-Replayed: true` |
 | 400, 401, 403, 409, 429 (validation, admission, permissions, conflicts) | No, unless the handler called `markIdempotencyCommitted`: a fresh claim is deleted, a taken-over one unlocked | Live; the same key runs again |
+| Any status once the handler has written its domain row (`markIdempotencyCommitted`), such as a 400 `TRANSACTION_FAILED` after the transfer row | Yes, 24h | Same status and body + `Idempotent-Replayed: true`; past 24h the failed row answers with the same status and code, and its message says to retry with a new key |
 | 5xx, `serverErrors: "store"` | Yes, like Stripe | Replayed; retry with a new key |
 | 5xx, `serverErrors: "rerun"` | No: unlocked, still bound to its fingerprint | A same-key retry runs again |
 | 2xx and other 4xx | Yes, 24h | Same status and body + `Idempotent-Replayed: true` |
 
+- A request that wrote its domain row has spent its key, whatever it answered: the retry gets the
+  same answer, never a different one from the row (a 400 first, then a 200 `status: "failed"`). To
+  try again after fixing the cause, send a new key. Recurring-payment attempts differ: their
+  handlers never call `markIdempotencyCommitted`, a failed attempt is left out of their unique
+  index, and the schedule returns to its prior state. What a same-key retry gets depends on how the
+  failure was answered:
+  - a 400, 401, 403, 409 or 429 (`TRANSACTION_FAILED`, `SIGNING_FAILED`, a state conflict) is not
+    stored, so the retry runs the action again;
+  - a 5xx is unlocked (`serverErrors: "rerun"`), so the retry runs the action again;
+  - any other 4xx, such as a 422 `SIGNING_REJECTED` or a 404, is stored like any answer and
+    replayed for 24 hours with `Idempotent-Replayed: true`. Only after the key expires does the same
+    key run the action again, because the failed attempt row no longer answers it. To try sooner,
+    send a new key.
 - `serverErrors` is required: each route states which applies. `rerun` is only for a route whose
   handler writes its own row under a unique key before it moves anything and answers a retry from
   that row; every other route stores the 5xx.
@@ -200,6 +273,8 @@ lives in `@sdp/types`.
   learn it.
 - Modules outside `stable` keep their own key handling until promoted. Their row fingerprints then
   become the backstop.
+- `PATCH /v1/payments/recurring-payments/{id}` requires the key with the other money routes:
+  editing an active schedule signs and broadcasts a replacement subscription.
 
 ### Known risks
 
@@ -211,3 +286,15 @@ lives in `@sdp/types`.
 - A `store` request still running past the renewal cap plus the lease is answered
   `IDEMPOTENCY_KEY_OUTCOME_UNKNOWN`, but it can still finish and record its outcome. A caller that
   already retried with a new key may then have caused the operation twice.
+
+## Follow-ups
+
+- HOO-2044: recurring activation, lifecycle and update sends save their signature, signed
+  transaction and blockhash window on the attempt before broadcast, so recovery confirms the saved
+  signature instead of signing again.
+- HOO-2045: split `requestGate` into `authorize`, `replayFromRecord` and admission on Earn,
+  issuance and ramps.
+- HOO-2046: stable routes validate path and query params at the route (the param sweep).
+- HOO-2047: payment requests in the public OpenAPI document.
+- Custody wallet create: an intent row before the provider call, for providers that do not dedupe
+  on a request id (see "Two layers").

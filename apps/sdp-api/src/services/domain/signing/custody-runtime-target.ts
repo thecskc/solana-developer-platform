@@ -14,6 +14,7 @@ import { type MovementId, SDP_RAMP_PROVIDER_STAGES } from "@sdp/types";
 import type { Address, TransactionSigner } from "@solana/kit";
 import type { Context } from "hono";
 import type { DatabaseClient } from "@/db";
+import { isCustodyWalletRequestRecorded } from "@/db/postgres-utils";
 import { AppError, conflict, internalError, notFound, providerUnavailable } from "@/lib/errors";
 import { isCustodyProviderAvailable } from "@/lib/feature-flags";
 import { decideMovement, readMoneyAdmissionFactsWith } from "@/lib/money-admission";
@@ -37,7 +38,9 @@ import {
   isCustodyProviderEntitled,
   isManagedCustodyUseAllowed,
 } from "@/services/provider-availability.service";
+import type { CustodyWalletIdempotency } from "@/services/stores/custody-config.store";
 import type { Env } from "@/types/env";
+import { privyWalletExternalId } from "./provider-wallet-lifecycle";
 import { boundSigningTime, custodySigningTimeoutMs } from "./signing-timeout";
 
 type ConfigAdapterResolver = (
@@ -498,6 +501,8 @@ export class CustodyRuntimeTargets {
     connectionId: string;
     label?: string;
     purpose?: CustodyWalletPurpose;
+    /** A keyed request's recovery point: sent to Privy and recorded on the row. */
+    idempotency?: CustodyWalletIdempotency | null;
   }): Promise<CreatedCustodyConnectionWallet> {
     const target = await this.resolveConnection(
       params.organizationId,
@@ -541,9 +546,16 @@ export class CustodyRuntimeTargets {
     });
     let provisioned: { walletId: string; address: string };
     try {
+      const requestId = params.idempotency?.requestId;
       provisioned = await provisionPrivyWallet(
         this.env,
-        { credentialRequest: true },
+        requestId
+          ? {
+              credentialRequest: true,
+              externalId: privyWalletExternalId(requestId),
+              idempotencyKey: requestId,
+            }
+          : { credentialRequest: true },
         authentication
       );
     } catch (error) {
@@ -568,9 +580,32 @@ export class CustodyRuntimeTargets {
         publicKey: provisioned.address,
         label: params.label,
         purpose: params.purpose,
+        idempotency: params.idempotency ?? null,
       });
     } catch (error) {
       // A failed/ambiguous commit cannot prove the Provider wallet was persisted.
+      if (
+        await isCustodyWalletRequestRecorded(this.db, error, params.idempotency?.requestId ?? null)
+      ) {
+        // Another attempt under this key recorded the same Privy wallet (Privy
+        // dedupes on the request id); the route answers from that row. This
+        // attempt's intent is resolved, not left open for reconciliation.
+        // The outcome names the wallet that won, not this attempt's id, which
+        // was never persisted.
+        const winner = await this.db
+          .prepare("SELECT id FROM custody_wallets WHERE idempotency_request_id = ?")
+          .bind(params.idempotency?.requestId ?? null)
+          .first<{ id: string }>();
+        await audit.completeCritical(params.auditContext, intent, {
+          resourceId: winner?.id,
+          metadata: {
+            result: "already_recorded",
+            custodyWalletId: winner?.id ?? null,
+            walletId: providerWalletId,
+          },
+        });
+        throw error;
+      }
       this.logWalletOrphanRisk(target, "persistence_failed", intent.id, providerWalletId);
       if (error instanceof AppError && error.code === "CONFLICT") {
         throw error;
@@ -850,6 +885,7 @@ export class CustodyRuntimeTargets {
       publicKey: string;
       label?: string;
       purpose?: CustodyWalletPurpose;
+      idempotency: CustodyWalletIdempotency | null;
     }
   ): Promise<CreatedCustodyConnectionWallet> {
     return this.db.transaction(async (tx) => {
@@ -909,8 +945,9 @@ export class CustodyRuntimeTargets {
       const created = await tx.queryOne<CreatedConnectionWalletRow>(
         `INSERT INTO custody_wallets (
            id, custody_config_id, custody_connection_id, wallet_id,
-           public_key, label, purpose, status, updated_at
-         ) VALUES (?, NULL, ?, ?, ?, ?, ?, 'active', sdp_iso_now())
+           public_key, label, purpose, status, idempotency_request_id,
+           idempotency_fingerprint, updated_at
+         ) VALUES (?, NULL, ?, ?, ?, ?, ?, 'active', ?, ?, sdp_iso_now())
          RETURNING id, wallet_id, public_key, label, purpose, created_at`,
         [
           wallet.id,
@@ -919,6 +956,8 @@ export class CustodyRuntimeTargets {
           wallet.publicKey,
           wallet.label ?? null,
           wallet.purpose ?? null,
+          wallet.idempotency?.requestId ?? null,
+          wallet.idempotency?.fingerprint ?? null,
         ]
       );
       if (!created) {

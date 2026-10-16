@@ -3,7 +3,7 @@
  */
 
 import { redactCredentialSecrets, redactCredentialString } from "@sdp/redaction";
-import type { CountryCode } from "@sdp/types";
+import type { CountryCode, IdempotencyErrorCode } from "@sdp/types";
 import type { RampProviderId } from "@sdp/types/provider-access";
 import type { CounterpartyRequirements, RampDirection } from "@sdp/types/ramp-requirements";
 
@@ -58,10 +58,7 @@ export type ErrorCode =
   // Earn volume caps (ADR 0004)
   | "VAULT_EXPOSURE_CAP"
   // Idempotency-Key (HOO-1918, draft-ietf-httpapi-idempotency-key-header)
-  | "IDEMPOTENCY_KEY_REQUIRED"
-  | "IDEMPOTENCY_KEY_REUSED"
-  | "IDEMPOTENCY_KEY_IN_FLIGHT"
-  | "IDEMPOTENCY_KEY_OUTCOME_UNKNOWN";
+  | IdempotencyErrorCode;
 
 export interface ApiError {
   code: ErrorCode;
@@ -197,6 +194,11 @@ const DEFAULT_ERROR_MESSAGES: Record<ErrorCode, string> = {
   IDEMPOTENCY_KEY_OUTCOME_UNKNOWN:
     "The original request with this Idempotency-Key never recorded its outcome; read the resource with GET to see whether it ran, then send again with a new Idempotency-Key",
 };
+
+/** Whether a value is one of the error codes the API answers with. */
+export function isErrorCode(value: unknown): value is ErrorCode {
+  return typeof value === "string" && Object.hasOwn(ERROR_STATUS_CODES, value);
+}
 
 export class AppError extends Error {
   public readonly code: ErrorCode;

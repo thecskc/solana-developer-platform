@@ -81,27 +81,29 @@ export function isAbandonedReservation(row: { status: string; updated_at: string
   );
 }
 
-export async function resolveIdentityBoundIdempotencyReplay<
-  Row extends { idempotency_fingerprint: string | null },
->(
-  findExisting: () => Promise<Row | null>,
-  fingerprint: string,
-  identityMatches: (row: Row) => boolean
-): Promise<Row | null> {
-  const existing = await findExisting();
-  if (!existing || existing.idempotency_fingerprint === null) {
-    return null;
-  }
-  if (identityMatches(existing) && existing.idempotency_fingerprint === fingerprint) {
-    return existing;
-  }
-  throw conflict("Idempotency key already used with different request payload");
-}
-
 /** A JSON value as `JSON.parse` returns it; parse untrusted values through it. */
 export const jsonValueSchema = z.json();
 
 export type JsonValue = z.infer<typeof jsonValueSchema>;
+
+/**
+ * For an Idempotency-Key fingerprint (HOO-1918): the body with each named
+ * decimal-string field spelled canonically, so "1.0" and "1" are one request.
+ * A field that is not a string is left as sent; validation already ran.
+ */
+export function canonicalizeDecimalFields(body: JsonValue, fields: readonly string[]): JsonValue {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return body;
+  }
+  const canonical = { ...body };
+  for (const field of fields) {
+    const value = canonical[field];
+    if (typeof value === "string") {
+      canonical[field] = normalizeDecimalString(value);
+    }
+  }
+  return canonical;
+}
 
 /**
  * Serializes a JSON value with object keys sorted by UTF-16 code unit, so equal
@@ -150,72 +152,6 @@ export const normalizeForFingerprint = (value: unknown): unknown => {
   return value;
 };
 
-export interface PaymentTransferFingerprintInput {
-  custodyWalletId: string;
-  sourceAddress: string | null;
-  destinationAddress: string | null;
-  token: string;
-  amount: string | null;
-  memo: string | null | undefined;
-  type: string;
-}
-
-export interface TransferBatchFingerprintRecipientInput {
-  externalId: string | null;
-  counterpartyId: string;
-  counterpartyAccountId: string;
-  destinationAddress: string;
-  amount: string;
-}
-
-export interface TransferBatchFingerprintInput {
-  sourceCustodyWalletId: string;
-  sourceAddress: string;
-  token: string;
-  recipients: TransferBatchFingerprintRecipientInput[];
-  options: Record<string, unknown> | undefined;
-}
-
-function paymentTransferFingerprint(
-  input: PaymentTransferFingerprintInput,
-  custodyWalletId?: string
-): string {
-  return JSON.stringify(
-    normalizeForFingerprint({
-      scope: "payment_transfer",
-      custodyWalletId,
-      sourceAddress: input.sourceAddress,
-      destinationAddress: input.destinationAddress,
-      token: input.token,
-      amount: input.amount,
-      memo: input.memo ?? null,
-      type: input.type,
-    })
-  );
-}
-
-export const buildPaymentTransferFingerprint = (input: PaymentTransferFingerprintInput): string =>
-  paymentTransferFingerprint(input, input.custodyWalletId);
-
-function transferBatchFingerprint(
-  input: TransferBatchFingerprintInput,
-  sourceCustodyWalletId?: string
-): string {
-  return JSON.stringify(
-    normalizeForFingerprint({
-      scope: "payment_transfer_batch",
-      sourceCustodyWalletId,
-      sourceAddress: input.sourceAddress,
-      token: input.token,
-      recipients: input.recipients,
-      options: input.options ?? null,
-    })
-  );
-}
-
-export const buildTransferBatchFingerprint = (input: TransferBatchFingerprintInput): string =>
-  transferBatchFingerprint(input, input.sourceCustodyWalletId);
-
 export interface EarnVaultDepositFingerprintInput {
   environment: string;
   provider: string;
@@ -238,7 +174,7 @@ export interface EarnVaultDepositFingerprintInput {
 }
 
 /** Canonicalize decimal spelling without rounding or passing through a float. */
-function normalizeDecimalString(value: string): string {
+export function normalizeDecimalString(value: string): string {
   const [integer = "0", fraction = ""] = value.split(".");
   const normalizedInteger = integer.replace(/^0+(?=\d)/, "") || "0";
   const normalizedFraction = fraction.replace(/0+$/, "");
