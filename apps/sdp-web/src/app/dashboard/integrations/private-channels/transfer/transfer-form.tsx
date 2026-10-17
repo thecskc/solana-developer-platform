@@ -17,7 +17,8 @@ import type { MessageKey } from "@/i18n/messages";
 import { useTranslations } from "@/i18n/provider";
 import { AmountField } from "../amount-field";
 import { getAmountError } from "../amount-validation";
-import { fetchWalletBalancesAction, type WalletBalanceView } from "../wallet-balances";
+import { useWalletBalances } from "../use-wallet-balances";
+import type { WalletBalanceView } from "../wallet-balances";
 import { createTransferAction, fetchTransferRecipientsAction } from "./actions";
 import { TransferProgress } from "./transfer-progress";
 
@@ -53,7 +54,6 @@ interface TransferFormState {
   showAmountError: boolean;
   recipientLoad: RecipientLoadState;
   recipientReload: number;
-  balances: WalletBalanceView;
   balanceRefetchKey: number;
   error: string | null;
   submittedTransfer: SubmittedTransfer | null;
@@ -117,7 +117,6 @@ function TransferFormState({
     showAmountError: false,
     recipientLoad: { status: "idle" },
     recipientReload: 0,
-    balances: { channel: null, onChain: null },
     balanceRefetchKey: 0,
     error: null,
     submittedTransfer: null,
@@ -216,21 +215,8 @@ function TransferFormState({
     }
   }, [recipientOptions, recipientVerifiedWalletId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: balanceRefetchKey intentionally triggers a fresh balance read.
-  useEffect(() => {
-    if (!walletId) {
-      updateState({ balances: { channel: null, onChain: null } });
-      return;
-    }
-    let active = true;
-    updateState({ balances: { channel: null, onChain: null } });
-    fetchWalletBalancesAction(walletId, mint || undefined).then((result) => {
-      if (active) updateState({ balances: result });
-    });
-    return () => {
-      active = false;
-    };
-  }, [walletId, mint, balanceRefetchKey]);
+  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
+  const balances = useWalletBalances(walletId, selectedToken?.mint, balanceRefetchKey);
 
   if (channels.length === 0) {
     return (
@@ -279,11 +265,6 @@ function TransferFormState({
 
   const amountErrorKey = showAmountError ? getAmountError(amount) : null;
   const amountError = amountErrorKey ? t(amountErrorKey) : null;
-  // Falls back to the first token so a `mint` left over from a changed token list
-  // cannot leave the label and the payload disagreeing. Relevant here because the
-  // remount key excludes the instance's RPC URL, so `tokens` can change in place.
-  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
-
   const submit = () => {
     if (submitting.current) {
       return;
@@ -357,6 +338,8 @@ function TransferFormState({
   return (
     <TransferFields
       amountError={amountError}
+      balances={balances}
+      selectedMint={selectedToken?.mint ?? ""}
       channels={channels}
       isSubmitting={isSubmitting}
       recipientOptions={recipientOptions}
@@ -377,6 +360,8 @@ type Translate = ReturnType<typeof useTranslations>;
 
 function TransferFields(props: {
   amountError: string | null;
+  balances: WalletBalanceView;
+  selectedMint: string;
   channels: PrivateChannelMembershipChannelDto[];
   isSubmitting: boolean;
   recipientOptions: RecipientOption[];
@@ -390,16 +375,8 @@ function TransferFields(props: {
   updateState: (update: TransferFormUpdate) => void;
   onSubmit: () => void;
 }) {
-  const {
-    amount,
-    balances,
-    channelId,
-    error,
-    mint,
-    recipientLoad,
-    recipientVerifiedWalletId,
-    walletId,
-  } = props.state;
+  const { amount, channelId, error, recipientLoad, recipientVerifiedWalletId, walletId } =
+    props.state;
 
   return (
     <form
@@ -529,12 +506,12 @@ function TransferFields(props: {
           <Select
             ariaLabel={props.t("DashboardPrivateChannels.common.tokenLabel")}
             disabled={props.isSubmitting}
-            value={mint}
+            value={props.selectedMint}
             onValueChange={(value) => {
               // Same freeze as the other financial fields — see the `submitting` note.
               if (props.submitting.current) return;
               const next = value ?? "";
-              if (next !== mint) {
+              if (next !== props.selectedMint) {
                 props.updateState({ error: null, mint: next });
               }
             }}
@@ -549,7 +526,7 @@ function TransferFields(props: {
       )}
 
       <AmountField
-        balances={balances}
+        balances={props.balances}
         disabled={props.isSubmitting}
         error={props.amountError}
         id="transfer-amount"

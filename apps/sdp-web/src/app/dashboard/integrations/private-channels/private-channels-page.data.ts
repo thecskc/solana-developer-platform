@@ -90,6 +90,23 @@ export function loadTokenEligibility(
   return toResult(() => fetchPrivateChannelTokenEligibility(client), []);
 }
 
+/** Money flows must distinguish an unreadable allowlist from a confirmed empty one. */
+export function loadEnabledTokens(
+  client: SdpApiClient
+): Promise<PrivateChannelsResult<PrivateChannelTokenEligibility[]>> {
+  return toResult(async () => {
+    const tokens = await fetchPrivateChannelTokenEligibility(client);
+    const enabled = tokens.filter((token) => token.enabled);
+    const unavailable = tokens
+      .flatMap((token) => token.exclusionReasons)
+      .find((reason) => reason.code === "ALLOWLIST_UNAVAILABLE");
+    if (enabled.length === 0 && unavailable) {
+      throw new Error(unavailable.message);
+    }
+    return enabled;
+  }, []);
+}
+
 /**
  * Custody wallets SDP can sign from AND that are SPC-verified — the
  * deposit/withdraw picker source. Verification is required either way: an

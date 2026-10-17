@@ -20,6 +20,7 @@
       "channelBalance": "Solde du canal :",
       "amountRequired": "Saisissez un montant en USDC.",
       "amountInvalid": "Saisissez un montant en USDC supérieur à zéro, avec jusqu'à 6 décimales.",
+      "balanceWithUnit": "{amount} {symbol}",
       "amountWithUnit": "{amount} USDC",
       "tokenLabel": "Token",
       "amountForToken": "Montant ({symbol})",

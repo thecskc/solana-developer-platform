@@ -4,7 +4,6 @@ import { getTranslations } from "@/i18n/server";
 import {
   fetchPrivateChannelPrincipals,
   fetchPrivateChannels,
-  fetchPrivateChannelTokenEligibility,
   fetchSignableCustodyWallets,
   fetchVerifiedWallets,
 } from "@/lib/private-channels";
@@ -14,7 +13,7 @@ import {
   requirePrivateChannelsAccess,
 } from "../private-channels-access";
 import { PrivateChannelsLoadError } from "../private-channels-load-error";
-import { loadInstance } from "../private-channels-page.data";
+import { loadEnabledTokens, loadInstance } from "../private-channels-page.data";
 import { TransferForm } from "./transfer-form";
 import {
   createTransferScopeKey,
@@ -38,7 +37,7 @@ export default async function PrivateChannelsTransferPage() {
   let loadError: string | undefined;
   let channels = intersectEligibleTransferChannels([], []);
   let sourceWallets = intersectVerifiedSourceWallets([], []);
-  let tokens = [] as Awaited<ReturnType<typeof fetchPrivateChannelTokenEligibility>>;
+  let tokens = [] as Awaited<ReturnType<typeof loadEnabledTokens>>["data"];
   try {
     const [principals, activeChannels, signableWallets, verifiedWallets, tokenEligibility] =
       await Promise.all([
@@ -46,12 +45,13 @@ export default async function PrivateChannelsTransferPage() {
         fetchPrivateChannels(client),
         fetchSignableCustodyWallets(client),
         fetchVerifiedWallets(client),
-        fetchPrivateChannelTokenEligibility(client),
+        loadEnabledTokens(client),
       ]);
     const defaultPrincipal = principals.find((principal) => principal.isDefault);
     channels = intersectEligibleTransferChannels(defaultPrincipal?.channels ?? [], activeChannels);
     sourceWallets = intersectVerifiedSourceWallets(signableWallets, verifiedWallets);
-    tokens = tokenEligibility.filter((token) => token.enabled);
+    tokens = tokenEligibility.data;
+    if (!tokenEligibility.ok) loadError = tokenEligibility.error;
   } catch (error) {
     loadError = extractSdpApiErrorMessage(error);
   }

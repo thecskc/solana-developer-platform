@@ -34,6 +34,7 @@
       "channelBalance": "Số dư kênh:",
       "amountRequired": "Nhập số lượng USDC.",
       "amountInvalid": "Nhập số USDC lớn hơn 0, tối đa 6 chữ số thập phân.",
+      "balanceWithUnit": "{amount} {symbol}",
       "amountWithUnit": "{amount} USDC"
     },
     "overview": {

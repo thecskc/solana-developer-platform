@@ -35,6 +35,7 @@
       "channelBalance": "Channel balance:",
       "amountRequired": "Enter an amount of USDC.",
       "amountInvalid": "Enter a USDC amount greater than zero with up to 6 decimal places.",
+      "balanceWithUnit": "{amount} {symbol}",
       "amountWithUnit": "{amount} USDC"
     },
     "overview": {

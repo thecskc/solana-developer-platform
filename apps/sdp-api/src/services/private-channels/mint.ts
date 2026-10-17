@@ -7,7 +7,7 @@
  * their default mint and metadata.
  */
 
-import { findAllowedMintPda } from "@sdp/spc-escrow";
+import { findAllowedMintPda, getAllowedMintDecoder } from "@sdp/spc-escrow";
 import type {
   PrivateChannelInstance,
   PrivateChannelToken,
@@ -18,6 +18,10 @@ import { privateChannelTokens, SPL_TOKEN_PROGRAMS, WELL_KNOWN_TOKENS } from "@sd
 import { address } from "@solana/kit";
 import { badRequest, serviceUnavailable } from "@/lib/errors";
 import type { PrivateChannelProjectRpcClient } from "./project-rpc";
+
+// AllowedMint account discriminator in the escrow program (distinct from AllowMint instruction).
+const ALLOWED_MINT_DISCRIMINATOR = 2;
+const allowedMintDecoder = getAllowedMintDecoder();
 
 type TokenEligibilityInstance = Pick<
   PrivateChannelInstance,
@@ -35,7 +39,7 @@ export async function readPrivateChannelTokenEligibility(
   return Promise.all(
     privateChannelTokens(projectRpc.cluster).map(async (token) => {
       try {
-        const [allowedMint] = await findAllowedMintPda(
+        const [allowedMint, bump] = await findAllowedMintPda(
           { instance: instanceAddress, mint: address(token.mint) },
           { programAddress }
         );
@@ -43,11 +47,18 @@ export async function readPrivateChannelTokenEligibility(
           await projectRpc.rpc
             .getAccountInfo(allowedMint, {
               encoding: "base64",
-              dataSlice: { offset: 0, length: 0 },
             })
             .send()
         ).value;
-        const enabled = account?.owner === instance.escrowProgramId;
+        let enabled = false;
+        if (account?.owner === instance.escrowProgramId) {
+          const data = Buffer.from(account.data[0], "base64");
+          // Validate the complete layout supported by our vendored escrow client.
+          if (data.length === allowedMintDecoder.fixedSize) {
+            const decoded = allowedMintDecoder.decode(data);
+            enabled = decoded.discriminator === ALLOWED_MINT_DISCRIMINATOR && decoded.bump === bump;
+          }
+        }
         return {
           ...token,
           enabled,

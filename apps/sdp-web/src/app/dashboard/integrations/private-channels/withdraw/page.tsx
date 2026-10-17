@@ -8,9 +8,9 @@ import {
 } from "../private-channels-access";
 import { PrivateChannelsLoadError } from "../private-channels-load-error";
 import {
+  loadEnabledTokens,
   loadInstance,
   loadSignableWallets,
-  loadTokenEligibility,
 } from "../private-channels-page.data";
 import { WithdrawForm } from "./withdraw-form";
 
@@ -21,7 +21,7 @@ export default async function PrivateChannelsWithdrawPage() {
   const [instance, wallets, tokenEligibility] = await Promise.all([
     loadInstance(client),
     loadSignableWallets(client),
-    loadTokenEligibility(client),
+    loadEnabledTokens(client),
   ]);
   if (!instance.ok) {
     return <PrivateChannelsLoadError message={instance.error} />;
@@ -39,10 +39,7 @@ export default async function PrivateChannelsWithdrawPage() {
         </CardHeader>
         <CardContent>
           {wallets.ok && tokenEligibility.ok ? (
-            <WithdrawForm
-              tokens={tokenEligibility.data.filter((token) => token.enabled)}
-              wallets={wallets.data}
-            />
+            <WithdrawForm tokens={tokenEligibility.data} wallets={wallets.data} />
           ) : (
             <PrivateChannelsLoadError message={wallets.error ?? tokenEligibility.error} />
           )}
