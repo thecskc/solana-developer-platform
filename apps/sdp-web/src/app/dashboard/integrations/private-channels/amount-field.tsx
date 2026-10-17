@@ -87,7 +87,7 @@ export function AmountField({
               <span className="text-primary" key={source}>
                 {t(BALANCE_LABEL_KEYS[source])}{" "}
                 <span className="font-medium">
-                  {t("DashboardPrivateChannels.common.amountWithUnit", { amount })}
+                  {t("DashboardPrivateChannels.common.balanceWithUnit", { amount, symbol })}
                 </span>
               </span>
             ))}

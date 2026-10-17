@@ -27,6 +27,7 @@
       "loadError": "Something went wrong loading this section.",
       "cancel": "Cancel",
       "tokenLabel": "Token",
+      "noEnabledTokens": "This Private Channels instance does not enable a supported token.",
       "amountForToken": "Amount ({symbol})",
       "amount": "Amount",
       "amountPlaceholder": "1.5",
@@ -34,6 +35,7 @@
       "channelBalance": "Channel balance:",
       "amountRequired": "Enter an amount of USDC.",
       "amountInvalid": "Enter a USDC amount greater than zero with up to 6 decimal places.",
+      "balanceWithUnit": "{amount} {symbol}",
       "amountWithUnit": "{amount} USDC"
     },
     "overview": {

@@ -22,6 +22,7 @@
       "channelBalance": "Saldo del canal:",
       "amountRequired": "Ingresa un monto de USDC.",
       "amountInvalid": "Ingresa un monto de USDC mayor que cero con hasta 6 decimales.",
+      "balanceWithUnit": "{amount} {symbol}",
       "amountWithUnit": "{amount} USDC"
     },
     "overview": {

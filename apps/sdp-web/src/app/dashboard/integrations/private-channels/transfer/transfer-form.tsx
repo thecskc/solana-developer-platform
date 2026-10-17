@@ -3,10 +3,10 @@
 import type {
   CustodyWalletSummary,
   PrivateChannelMembershipChannelDto,
+  PrivateChannelTokenEligibility,
   PrivateChannelTransfer,
   PrivateChannelTransferRecipientDto,
 } from "@sdp/types";
-import { privateChannelTokens } from "@sdp/types";
 import { Loader2Icon } from "lucide-react";
 import { useEffect, useMemo, useReducer, useRef, useTransition } from "react";
 import { toast } from "sonner";
@@ -15,10 +15,10 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectItem } from "@/components/ui/select";
 import type { MessageKey } from "@/i18n/messages";
 import { useTranslations } from "@/i18n/provider";
-import { useSolanaCluster } from "@/lib/use-solana-cluster";
 import { AmountField } from "../amount-field";
 import { getAmountError } from "../amount-validation";
-import { fetchWalletBalancesAction, type WalletBalanceView } from "../wallet-balances";
+import { useWalletBalances } from "../use-wallet-balances";
+import type { WalletBalanceView } from "../wallet-balances";
 import { createTransferAction, fetchTransferRecipientsAction } from "./actions";
 import { TransferProgress } from "./transfer-progress";
 
@@ -42,6 +42,7 @@ interface TransferFormProps {
   channels: PrivateChannelMembershipChannelDto[];
   scopeKey: string;
   sourceWallets: CustodyWalletSummary[];
+  tokens: PrivateChannelTokenEligibility[];
 }
 
 interface TransferFormState {
@@ -53,7 +54,6 @@ interface TransferFormState {
   showAmountError: boolean;
   recipientLoad: RecipientLoadState;
   recipientReload: number;
-  balances: WalletBalanceView;
   balanceRefetchKey: number;
   error: string | null;
   submittedTransfer: SubmittedTransfer | null;
@@ -102,8 +102,11 @@ export function TransferForm({ scopeKey, ...props }: TransferFormProps) {
   return <TransferFormState key={scopeKey} {...props} />;
 }
 
-function TransferFormState({ channels, sourceWallets }: Omit<TransferFormProps, "scopeKey">) {
-  const tokens = privateChannelTokens(useSolanaCluster());
+function TransferFormState({
+  channels,
+  sourceWallets,
+  tokens,
+}: Omit<TransferFormProps, "scopeKey">) {
   const t = useTranslations();
   const [state, updateState] = useReducer(transferFormReducer, {
     channelId: channels[0]?.id ?? "",
@@ -114,7 +117,6 @@ function TransferFormState({ channels, sourceWallets }: Omit<TransferFormProps, 
     showAmountError: false,
     recipientLoad: { status: "idle" },
     recipientReload: 0,
-    balances: { channel: null, onChain: null },
     balanceRefetchKey: 0,
     error: null,
     submittedTransfer: null,
@@ -213,21 +215,8 @@ function TransferFormState({ channels, sourceWallets }: Omit<TransferFormProps, 
     }
   }, [recipientOptions, recipientVerifiedWalletId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: balanceRefetchKey intentionally triggers a fresh balance read.
-  useEffect(() => {
-    if (!walletId) {
-      updateState({ balances: { channel: null, onChain: null } });
-      return;
-    }
-    let active = true;
-    updateState({ balances: { channel: null, onChain: null } });
-    fetchWalletBalancesAction(walletId, mint || undefined).then((result) => {
-      if (active) updateState({ balances: result });
-    });
-    return () => {
-      active = false;
-    };
-  }, [walletId, mint, balanceRefetchKey]);
+  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
+  const balances = useWalletBalances(walletId, selectedToken?.mint, balanceRefetchKey);
 
   if (channels.length === 0) {
     return (
@@ -276,13 +265,12 @@ function TransferFormState({ channels, sourceWallets }: Omit<TransferFormProps, 
 
   const amountErrorKey = showAmountError ? getAmountError(amount) : null;
   const amountError = amountErrorKey ? t(amountErrorKey) : null;
-  // Falls back to the first token so a `mint` left over from a changed token list
-  // cannot leave the label and the payload disagreeing. Relevant here because the
-  // remount key excludes the instance's RPC URL, so `tokens` can change in place.
-  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
-
   const submit = () => {
     if (submitting.current) {
+      return;
+    }
+    if (!selectedToken) {
+      updateState({ error: t("DashboardPrivateChannels.common.noEnabledTokens") });
       return;
     }
 
@@ -350,6 +338,8 @@ function TransferFormState({ channels, sourceWallets }: Omit<TransferFormProps, 
   return (
     <TransferFields
       amountError={amountError}
+      balances={balances}
+      selectedMint={selectedToken?.mint ?? ""}
       channels={channels}
       isSubmitting={isSubmitting}
       recipientOptions={recipientOptions}
@@ -370,6 +360,8 @@ type Translate = ReturnType<typeof useTranslations>;
 
 function TransferFields(props: {
   amountError: string | null;
+  balances: WalletBalanceView;
+  selectedMint: string;
   channels: PrivateChannelMembershipChannelDto[];
   isSubmitting: boolean;
   recipientOptions: RecipientOption[];
@@ -379,20 +371,12 @@ function TransferFields(props: {
   state: TransferFormState;
   submitting: { current: boolean };
   t: Translate;
-  tokens: ReturnType<typeof privateChannelTokens>;
+  tokens: PrivateChannelTokenEligibility[];
   updateState: (update: TransferFormUpdate) => void;
   onSubmit: () => void;
 }) {
-  const {
-    amount,
-    balances,
-    channelId,
-    error,
-    mint,
-    recipientLoad,
-    recipientVerifiedWalletId,
-    walletId,
-  } = props.state;
+  const { amount, channelId, error, recipientLoad, recipientVerifiedWalletId, walletId } =
+    props.state;
 
   return (
     <form
@@ -402,6 +386,12 @@ function TransferFields(props: {
         props.onSubmit();
       }}
     >
+      {props.tokens.length === 0 && (
+        <p className="text-secondary text-sm">
+          {props.t("DashboardPrivateChannels.common.noEnabledTokens")}
+        </p>
+      )}
+
       <div className="space-y-1.5">
         <Label>{props.t("DashboardPrivateChannels.transfer.channel")}</Label>
         <Select
@@ -516,12 +506,12 @@ function TransferFields(props: {
           <Select
             ariaLabel={props.t("DashboardPrivateChannels.common.tokenLabel")}
             disabled={props.isSubmitting}
-            value={mint}
+            value={props.selectedMint}
             onValueChange={(value) => {
               // Same freeze as the other financial fields — see the `submitting` note.
               if (props.submitting.current) return;
               const next = value ?? "";
-              if (next !== mint) {
+              if (next !== props.selectedMint) {
                 props.updateState({ error: null, mint: next });
               }
             }}
@@ -536,7 +526,7 @@ function TransferFields(props: {
       )}
 
       <AmountField
-        balances={balances}
+        balances={props.balances}
         disabled={props.isSubmitting}
         error={props.amountError}
         id="transfer-amount"
@@ -563,6 +553,7 @@ function TransferFields(props: {
           props.isSubmitting ||
           !channelId ||
           !walletId ||
+          props.tokens.length === 0 ||
           !recipientVerifiedWalletId ||
           !amount.trim()
         }

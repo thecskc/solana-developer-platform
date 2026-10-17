@@ -13,7 +13,7 @@ import {
   requirePrivateChannelsAccess,
 } from "../private-channels-access";
 import { PrivateChannelsLoadError } from "../private-channels-load-error";
-import { loadInstance } from "../private-channels-page.data";
+import { loadEnabledTokens, loadInstance } from "../private-channels-page.data";
 import { TransferForm } from "./transfer-form";
 import {
   createTransferScopeKey,
@@ -37,16 +37,21 @@ export default async function PrivateChannelsTransferPage() {
   let loadError: string | undefined;
   let channels = intersectEligibleTransferChannels([], []);
   let sourceWallets = intersectVerifiedSourceWallets([], []);
+  let tokens = [] as Awaited<ReturnType<typeof loadEnabledTokens>>["data"];
   try {
-    const [principals, activeChannels, signableWallets, verifiedWallets] = await Promise.all([
-      fetchPrivateChannelPrincipals(client),
-      fetchPrivateChannels(client),
-      fetchSignableCustodyWallets(client),
-      fetchVerifiedWallets(client),
-    ]);
+    const [principals, activeChannels, signableWallets, verifiedWallets, tokenEligibility] =
+      await Promise.all([
+        fetchPrivateChannelPrincipals(client),
+        fetchPrivateChannels(client),
+        fetchSignableCustodyWallets(client),
+        fetchVerifiedWallets(client),
+        loadEnabledTokens(client),
+      ]);
     const defaultPrincipal = principals.find((principal) => principal.isDefault);
     channels = intersectEligibleTransferChannels(defaultPrincipal?.channels ?? [], activeChannels);
     sourceWallets = intersectVerifiedSourceWallets(signableWallets, verifiedWallets);
+    tokens = tokenEligibility.data;
+    if (!tokenEligibility.ok) loadError = tokenEligibility.error;
   } catch (error) {
     loadError = extractSdpApiErrorMessage(error);
   }
@@ -68,7 +73,12 @@ export default async function PrivateChannelsTransferPage() {
           {loadError ? (
             <PrivateChannelsLoadError message={loadError} />
           ) : (
-            <TransferForm channels={channels} scopeKey={scopeKey} sourceWallets={sourceWallets} />
+            <TransferForm
+              channels={channels}
+              scopeKey={scopeKey}
+              sourceWallets={sourceWallets}
+              tokens={tokens}
+            />
           )}
         </CardContent>
       </Card>

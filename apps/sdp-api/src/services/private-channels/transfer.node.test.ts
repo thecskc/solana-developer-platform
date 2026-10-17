@@ -1,4 +1,5 @@
 import * as solanaRpc from "@sdp/rpc/solana";
+import { findAllowedMintPda, PRIVATE_CHANNEL_ESCROW_PROGRAM_ADDRESS } from "@sdp/spc-escrow";
 import type { PrivateChannelBalance } from "@sdp/types";
 import {
   type Address,
@@ -87,6 +88,8 @@ function makeInput(overrides: Partial<Parameters<typeof createChannelTransfer>[1
     instance: {
       id: INSTANCE_ID,
       gatewayUrl: GATEWAY_URL,
+      escrowProgramId: PRIVATE_CHANNEL_ESCROW_PROGRAM_ADDRESS,
+      escrowInstanceAddr: senderSigner.address,
     },
     organizationId: ORGANIZATION_ID,
     projectId: PROJECT_ID,
@@ -102,7 +105,27 @@ function makeInput(overrides: Partial<Parameters<typeof createChannelTransfer>[1
     },
     amount: "1.25",
     gatewayAuth: auth,
-    cluster: "devnet" as const,
+    projectRpc: {
+      cluster: "devnet" as const,
+      rpc: {
+        getAccountInfo: () => ({
+          send: async () => {
+            const [, bump] = await findAllowedMintPda({
+              instance: senderSigner.address,
+              mint: address(MINT),
+            });
+            return {
+              value: {
+                owner: PRIVATE_CHANNEL_ESCROW_PROGRAM_ADDRESS,
+                data: [Buffer.from([2, bump]).toString("base64"), "base64"],
+              },
+            };
+          },
+        }),
+      } as never,
+      target: {} as never,
+      probe: vi.fn(),
+    },
     ...overrides,
   };
 }
@@ -285,6 +308,24 @@ describe("createChannelTransfer", () => {
 
     expect(solanaRpc.sendTransaction).not.toHaveBeenCalled();
     expect(repo.createTransfer).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed allowlist account before persistence or broadcast", async () => {
+    const input = makeInput();
+    vi.spyOn(input.projectRpc.rpc, "getAccountInfo").mockReturnValue({
+      send: async () => ({
+        value: {
+          owner: PRIVATE_CHANNEL_ESCROW_PROGRAM_ADDRESS,
+          data: ["", "base64"],
+        },
+      }),
+    } as never);
+
+    await expect(createChannelTransfer(TEST_ENV, input)).rejects.toMatchObject({
+      code: "BAD_REQUEST",
+    });
+    expect(repo.createTransfer).not.toHaveBeenCalled();
+    expect(solanaRpc.sendTransaction).not.toHaveBeenCalled();
   });
 
   it("rejects insufficient SPC balance before sending or persistence", async () => {

@@ -5,6 +5,7 @@ import type {
   PrivateChannelInstance,
   PrivateChannelInstanceOverview,
   PrivateChannelPrincipalDto,
+  PrivateChannelTokenEligibility,
   PrivateChannelVerifiedWalletDto,
 } from "@sdp/types";
 import {
@@ -16,6 +17,7 @@ import {
   fetchPrivateChannelOverview,
   fetchPrivateChannelPrincipals,
   fetchPrivateChannels,
+  fetchPrivateChannelTokenEligibility,
   fetchVerifiedSignableWallets,
   fetchVerifiedWallets,
 } from "@/lib/private-channels";
@@ -80,6 +82,29 @@ export function loadChannels(
   client: SdpApiClient
 ): Promise<PrivateChannelsResult<PrivateChannelDto[]>> {
   return toResult(() => fetchPrivateChannels(client), []);
+}
+
+export function loadTokenEligibility(
+  client: SdpApiClient
+): Promise<PrivateChannelsResult<PrivateChannelTokenEligibility[]>> {
+  return toResult(() => fetchPrivateChannelTokenEligibility(client), []);
+}
+
+/** Money flows must distinguish an unreadable allowlist from a confirmed empty one. */
+export function loadEnabledTokens(
+  client: SdpApiClient
+): Promise<PrivateChannelsResult<PrivateChannelTokenEligibility[]>> {
+  return toResult(async () => {
+    const tokens = await fetchPrivateChannelTokenEligibility(client);
+    const enabled = tokens.filter((token) => token.enabled);
+    const unavailable = tokens
+      .flatMap((token) => token.exclusionReasons)
+      .find((reason) => reason.code === "ALLOWLIST_UNAVAILABLE");
+    if (enabled.length === 0 && unavailable) {
+      throw new Error(unavailable.message);
+    }
+    return enabled;
+  }, []);
 }
 
 /**

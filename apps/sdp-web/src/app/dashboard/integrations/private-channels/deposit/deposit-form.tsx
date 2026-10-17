@@ -1,24 +1,23 @@
 "use client";
 
-import {
-  type CustodyWalletSummary,
-  type PrivateChannelDeposit,
-  privateChannelTokens,
+import type {
+  CustodyWalletSummary,
+  PrivateChannelDeposit,
+  PrivateChannelTokenEligibility,
 } from "@sdp/types";
 import { Loader2Icon } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useReducer, useTransition } from "react";
+import { useReducer, useTransition } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectItem } from "@/components/ui/select";
 import { useTranslations } from "@/i18n/provider";
-import { useSolanaCluster } from "@/lib/use-solana-cluster";
 import { AmountField } from "../amount-field";
 import { getAmountError } from "../amount-validation";
 import { PRIVATE_CHANNELS_OVERVIEW_PATH } from "../private-channels-routes";
-import { fetchWalletBalancesAction, type WalletBalanceView } from "../wallet-balances";
+import { useWalletBalances } from "../use-wallet-balances";
 import { createDepositAction } from "./actions";
 import { DepositProgress } from "./deposit-progress";
 
@@ -35,7 +34,6 @@ interface DepositFormState {
   recipient: string;
   error: string | null;
   deposit: PrivateChannelDeposit | null;
-  balances: WalletBalanceView;
   refetchKey: number;
 }
 
@@ -48,8 +46,13 @@ function depositFormReducer(state: DepositFormState, update: DepositFormUpdate):
   return { ...state, ...patch };
 }
 
-export function DepositForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
-  const tokens = privateChannelTokens(useSolanaCluster());
+export function DepositForm({
+  wallets,
+  tokens,
+}: {
+  wallets: CustodyWalletSummary[];
+  tokens: PrivateChannelTokenEligibility[];
+}) {
   const [state, updateState] = useReducer(depositFormReducer, {
     walletId: wallets[0]?.walletId ?? "",
     mint: tokens[0]?.mint ?? "",
@@ -58,38 +61,14 @@ export function DepositForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
     recipient: "",
     error: null,
     deposit: null,
-    balances: { channel: null, onChain: null },
     refetchKey: 0,
   });
   const [isSubmitting, startTransition] = useTransition();
   const t = useTranslations();
-  const {
-    walletId,
-    mint,
-    amount,
-    showAmountError,
-    recipient,
-    error,
-    deposit,
-    balances,
-    refetchKey,
-  } = state;
+  const { walletId, mint, amount, showAmountError, recipient, error, deposit, refetchKey } = state;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refetchKey is the refetch trigger, not a value read in the effect.
-  useEffect(() => {
-    if (!walletId) {
-      updateState({ balances: { channel: null, onChain: null } });
-      return;
-    }
-    let active = true;
-    updateState({ balances: { channel: null, onChain: null } });
-    fetchWalletBalancesAction(walletId, mint || undefined).then((result) => {
-      if (active) updateState({ balances: result });
-    });
-    return () => {
-      active = false;
-    };
-  }, [walletId, mint, refetchKey]);
+  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
+  const balances = useWalletBalances(walletId, selectedToken?.mint, refetchKey);
 
   if (deposit) {
     return (
@@ -124,12 +103,16 @@ export function DepositForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
     );
   }
 
+  if (tokens.length === 0) {
+    return (
+      <p className="text-secondary text-sm">
+        {t("DashboardPrivateChannels.common.noEnabledTokens")}
+      </p>
+    );
+  }
+
   const amountErrorKey = showAmountError ? getAmountError(amount) : null;
   const amountError = amountErrorKey ? t(amountErrorKey) : null;
-  // Falls back to the first token so a `mint` left over from a changed token list
-  // cannot leave the label and the payload disagreeing.
-  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
-
   const submit = () => {
     // An amount problem already renders under the field, so it is not repeated here.
     updateState({ showAmountError: true, error: null });
@@ -183,7 +166,7 @@ export function DepositForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
           <Select
             ariaLabel={t("DashboardPrivateChannels.common.tokenLabel")}
             onValueChange={(value) => updateState({ mint: value ?? "" })}
-            value={mint}
+            value={selectedToken?.mint ?? ""}
           >
             {tokens.map((token) => (
               <SelectItem key={token.mint} value={token.mint}>

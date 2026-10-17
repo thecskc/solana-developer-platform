@@ -1,21 +1,23 @@
 "use client";
 
-import type { CustodyWalletSummary, PrivateChannelWithdrawal } from "@sdp/types";
-import { privateChannelTokens } from "@sdp/types";
+import type {
+  CustodyWalletSummary,
+  PrivateChannelTokenEligibility,
+  PrivateChannelWithdrawal,
+} from "@sdp/types";
 import { Loader2Icon } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useReducer, useTransition } from "react";
+import { useReducer, useTransition } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectItem } from "@/components/ui/select";
 import { useTranslations } from "@/i18n/provider";
-import { useSolanaCluster } from "@/lib/use-solana-cluster";
 import { AmountField } from "../amount-field";
 import { getAmountError } from "../amount-validation";
 import { PRIVATE_CHANNELS_OVERVIEW_PATH } from "../private-channels-routes";
-import { fetchWalletBalancesAction, type WalletBalanceView } from "../wallet-balances";
+import { useWalletBalances } from "../use-wallet-balances";
 import { createWithdrawalAction } from "./actions";
 import { WithdrawProgress } from "./withdraw-progress";
 
@@ -32,7 +34,6 @@ interface WithdrawFormState {
   destination: string;
   error: string | null;
   withdrawal: PrivateChannelWithdrawal | null;
-  balances: WalletBalanceView;
   refetchKey: number;
 }
 
@@ -48,8 +49,13 @@ function withdrawFormReducer(
   return { ...state, ...patch };
 }
 
-export function WithdrawForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
-  const tokens = privateChannelTokens(useSolanaCluster());
+export function WithdrawForm({
+  wallets,
+  tokens,
+}: {
+  wallets: CustodyWalletSummary[];
+  tokens: PrivateChannelTokenEligibility[];
+}) {
   const [state, updateState] = useReducer(withdrawFormReducer, {
     walletId: wallets[0]?.walletId ?? "",
     mint: tokens[0]?.mint ?? "",
@@ -58,38 +64,15 @@ export function WithdrawForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
     destination: "",
     error: null,
     withdrawal: null,
-    balances: { channel: null, onChain: null },
     refetchKey: 0,
   });
   const [isSubmitting, startTransition] = useTransition();
   const t = useTranslations();
-  const {
-    walletId,
-    mint,
-    amount,
-    showAmountError,
-    destination,
-    error,
-    withdrawal,
-    balances,
-    refetchKey,
-  } = state;
+  const { walletId, mint, amount, showAmountError, destination, error, withdrawal, refetchKey } =
+    state;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refetchKey is the refetch trigger, not a value read in the effect.
-  useEffect(() => {
-    if (!walletId) {
-      updateState({ balances: { channel: null, onChain: null } });
-      return;
-    }
-    let active = true;
-    updateState({ balances: { channel: null, onChain: null } });
-    fetchWalletBalancesAction(walletId, mint || undefined).then((result) => {
-      if (active) updateState({ balances: result });
-    });
-    return () => {
-      active = false;
-    };
-  }, [walletId, mint, refetchKey]);
+  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
+  const balances = useWalletBalances(walletId, selectedToken?.mint, refetchKey);
 
   if (withdrawal) {
     return (
@@ -124,12 +107,16 @@ export function WithdrawForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
     );
   }
 
+  if (tokens.length === 0) {
+    return (
+      <p className="text-secondary text-sm">
+        {t("DashboardPrivateChannels.common.noEnabledTokens")}
+      </p>
+    );
+  }
+
   const amountErrorKey = showAmountError ? getAmountError(amount) : null;
   const amountError = amountErrorKey ? t(amountErrorKey) : null;
-  // Falls back to the first token so a `mint` left over from a changed token list
-  // cannot leave the label and the payload disagreeing.
-  const selectedToken = tokens.find((token) => token.mint === mint) ?? tokens[0];
-
   const submit = () => {
     // An amount problem already renders under the field, so it is not repeated here.
     updateState({ showAmountError: true, error: null });
@@ -183,7 +170,7 @@ export function WithdrawForm({ wallets }: { wallets: CustodyWalletSummary[] }) {
           <Select
             ariaLabel={t("DashboardPrivateChannels.common.tokenLabel")}
             onValueChange={(value) => updateState({ mint: value ?? "" })}
-            value={mint}
+            value={selectedToken?.mint ?? ""}
           >
             {tokens.map((token) => (
               <SelectItem key={token.mint} value={token.mint}>
