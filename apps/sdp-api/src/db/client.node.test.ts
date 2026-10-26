@@ -15,6 +15,9 @@ interface MockPool {
   queries: unknown[];
   connectedClients: MockPoolClient[];
   end: ReturnType<typeof vi.fn>;
+  totalCount: number;
+  idleCount: number;
+  waitingCount: number;
 }
 
 const pgMock = vi.hoisted(() => ({
@@ -22,6 +25,7 @@ const pgMock = vi.hoisted(() => ({
   poolQuery: async (): Promise<MockQueryResult> => ({ rows: [], rowCount: 0 }),
   poolClientQuery: async (): Promise<MockQueryResult> => ({ rows: [], rowCount: 0 }),
   poolEnd: async (): Promise<void> => {},
+  poolConnect: async (): Promise<void> => {},
 }));
 
 vi.mock("pg", () => {
@@ -51,6 +55,7 @@ vi.mock("pg", () => {
     async connect(): Promise<
       MockPoolClient & { query: (...args: unknown[]) => Promise<MockQueryResult> }
     > {
+      await pgMock.poolConnect();
       const client = {
         queries: [] as unknown[][],
         query: async (...args: unknown[]): Promise<MockQueryResult> => {
@@ -91,11 +96,14 @@ describe("database client connection management", () => {
 
   beforeEach(async () => {
     vi.stubEnv("PG_POOL_MAX", undefined);
+    vi.stubEnv("K_SERVICE", undefined);
+    vi.stubEnv("CLOUD_RUN_JOB", undefined);
     await closeDatabasePools();
     pgMock.pools.length = 0;
     pgMock.poolQuery = async () => ({ rows: [], rowCount: 0 });
     pgMock.poolClientQuery = async () => ({ rows: [], rowCount: 0 });
     pgMock.poolEnd = async () => {};
+    pgMock.poolConnect = async () => {};
   });
 
   afterEach(async () => {
@@ -180,6 +188,121 @@ describe("database client connection management", () => {
     } finally {
       info.mockRestore();
       vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { service: "sdp-api", job: "sdp-reconcile", expected: "sdp-api" },
+    { service: undefined, job: "sdp-reconcile", expected: "sdp-reconcile" },
+    { service: undefined, job: undefined, expected: null },
+  ])("attributes a short pool lifetime to $expected", async ({ service, job, expected }) => {
+    vi.stubEnv("K_SERVICE", service);
+    vi.stubEnv("CLOUD_RUN_JOB", job);
+    const info = vi.spyOn(getLogger(), "info");
+    try {
+      await createDatabaseClient("postgresql://short-job/sdp").queryOne("SELECT 1");
+      await closeDatabasePools();
+
+      const samples = info.mock.calls.filter(([event]) =>
+        JSON.stringify(event).includes("sdp_db_pool_stats")
+      );
+      expect(samples.map(([event]) => event)).toEqual([
+        expect.objectContaining({ reason: "opened", service: expected }),
+        expect.objectContaining({ reason: "closing", service: expected }),
+      ]);
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it.each(["query", "transaction", "locked transaction"])(
+    "logs a checkout failure between interval samples for a %s",
+    async (operation) => {
+      vi.useFakeTimers();
+      const info = vi.spyOn(getLogger(), "info");
+      try {
+        const db = createDatabaseClient("postgresql://checkout-timeout/sdp");
+        const pool = pgMock.pools[0];
+        if (!pool) throw new Error("pool was not created");
+        const failure = new Error("timeout exceeded when trying to connect");
+        pgMock.poolConnect = () => {
+          pool.waitingCount = 1;
+          return new Promise((_, reject) => {
+            setTimeout(() => {
+              pool.waitingCount = 0;
+              reject(failure);
+            }, 5_000);
+          });
+        };
+        const identity = await import("./identity");
+        const work = () => {
+          switch (operation) {
+            case "query":
+              return db.queryOne("SELECT 1");
+            case "transaction":
+              return db.transaction(async () => undefined);
+            default:
+              return db.lockedTransactionWithPostCommit?.(
+                "test-lock",
+                async () => undefined,
+                async () => undefined
+              );
+          }
+        };
+        const pending = identity.runWithSystemDatabaseIdentity("pool-test", work);
+        const assertion = expect(pending).rejects.toBe(failure);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await assertion;
+
+        expect(info).toHaveBeenCalledWith(
+          expect.objectContaining({
+            event: "sdp_db_pool_stats",
+            reason: "checkout_failure",
+            waiting: 0,
+            peak_waiting: 1,
+            checkout_failures: 1,
+          }),
+          "database pool stats"
+        );
+        expect(pool.connectedClients).toHaveLength(0);
+      } finally {
+        info.mockRestore();
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it("logs direct pool query failures before the next sample without changing the error", async () => {
+    const failure = new Error("timeout exceeded when trying to connect");
+    pgMock.poolQuery = async () => {
+      throw failure;
+    };
+    const info = vi.spyOn(getLogger(), "info");
+    try {
+      await expect(
+        createDatabaseClient("postgresql://query-timeout/sdp").queryOne("SELECT 1")
+      ).rejects.toBe(failure);
+      expect(info).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "query_failure", query_failures: 1 }),
+        "database pool stats"
+      );
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it("keeps query outcomes and shutdown intact when telemetry throws", async () => {
+    const info = vi.spyOn(getLogger(), "info").mockImplementation(() => {
+      throw new Error("logger unavailable");
+    });
+    try {
+      await expect(
+        createDatabaseClient("postgresql://logging-unavailable/sdp").queryOne("SELECT 1")
+      ).resolves.toBeNull();
+      await expect(closeDatabasePools()).resolves.toBeUndefined();
+      expect(pgMock.pools[0]?.end).toHaveBeenCalledOnce();
+    } finally {
+      info.mockRestore();
     }
   });
 

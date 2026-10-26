@@ -138,6 +138,16 @@ export const FIELDS: EnvField[] = [
     visibleWhen: isProvider("DATABASE_MODE", "external"),
   },
 
+  {
+    key: "PG_POOL_MAX",
+    section: "database",
+    kind: "text",
+    label: "Maximum database connections per process",
+    defaultValue: "10",
+    pattern: /^[1-9]\d*$/,
+    help: "Positive integer. Allow for all API replicas and worker processes when choosing a limit.",
+  },
+
   // Cache
   {
     key: "CACHE_MODE",

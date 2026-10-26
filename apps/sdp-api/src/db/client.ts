@@ -1,4 +1,4 @@
-import { Pool, type QueryResult, types } from "pg";
+import { Pool, type PoolClient, type QueryResult, types } from "pg";
 import { z } from "zod";
 import {
   currentDatabaseIdentity,
@@ -78,6 +78,29 @@ const pooledClients = new Map<string, PooledPostgresClient>();
 
 const DEFAULT_POOL_MAX = 10;
 const POOL_STATS_INTERVAL_MS = 15_000;
+
+interface PoolStats {
+  max: number;
+  peakWaiting: number;
+  checkoutFailures: number;
+  queryFailures: number;
+}
+
+function recordPoolQueue(pool: Pool, stats: PoolStats): void {
+  stats.peakWaiting = Math.max(stats.peakWaiting, pool.waitingCount);
+}
+
+async function connectWithPoolStats(pool: Pool, stats: PoolStats): Promise<PoolClient> {
+  try {
+    const pending = pool.connect();
+    recordPoolQueue(pool, stats);
+    return await pending;
+  } catch (error) {
+    stats.checkoutFailures += 1;
+    logPoolStats(pool, stats, "checkout_failure");
+    throw error;
+  }
+}
 
 const poolMaxSchema = z.coerce.number().int().positive();
 
@@ -332,15 +355,26 @@ async function beginWithDatabaseIdentity(
  * straight to the pool and RLS fails closed.
  */
 class IdentityStampingPoolQueryable implements Queryable {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly stats: PoolStats
+  ) {}
 
   async query(args: QueryArgs): Promise<QueryResult> {
     const identity = currentDatabaseIdentity();
     if (!identity || identity.kind === "none") {
-      return this.pool.query(args);
+      try {
+        const pending = this.pool.query(args);
+        recordPoolQueue(this.pool, this.stats);
+        return await pending;
+      } catch (error) {
+        this.stats.queryFailures += 1;
+        logPoolStats(this.pool, this.stats, "query_failure");
+        throw error;
+      }
     }
 
-    const client = await this.pool.connect();
+    const client = await connectWithPoolStats(this.pool, this.stats);
     let releaseError: Error | undefined;
     try {
       await beginWithDatabaseIdentity(client, identity);
@@ -363,6 +397,7 @@ class IdentityStampingPoolQueryable implements Queryable {
 
 class PooledPostgresClient extends BasePostgresClient {
   private readonly pool: Pool;
+  private readonly stats: PoolStats;
   private readonly statsTimer: NodeJS.Timeout;
 
   constructor(connectionString: string) {
@@ -372,9 +407,15 @@ class PooledPostgresClient extends BasePostgresClient {
       ...NODE_POOL_OPTIONS,
       max,
     });
-    super(new IdentityStampingPoolQueryable(pool));
+    const stats: PoolStats = { max, peakWaiting: 0, checkoutFailures: 0, queryFailures: 0 };
+    super(new IdentityStampingPoolQueryable(pool, stats));
     this.pool = pool;
-    this.statsTimer = setInterval(() => logPoolStats(pool, max), POOL_STATS_INTERVAL_MS);
+    this.stats = stats;
+    logPoolStats(pool, stats, "opened");
+    this.statsTimer = setInterval(
+      () => logPoolStats(pool, stats, "interval"),
+      POOL_STATS_INTERVAL_MS
+    );
     this.statsTimer.unref();
 
     // Idle pool errors are EventEmitter errors; without a listener Node treats
@@ -385,7 +426,7 @@ class PooledPostgresClient extends BasePostgresClient {
   }
 
   async transaction<T>(callback: (tx: DatabaseExecutor) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+    const client = await connectWithPoolStats(this.pool, this.stats);
     let releaseError: Error | undefined;
 
     try {
@@ -414,7 +455,7 @@ class PooledPostgresClient extends BasePostgresClient {
     afterRollback?: (result: T) => Promise<void>,
     options?: { wait?: boolean }
   ): Promise<T> {
-    const client = await this.pool.connect();
+    const client = await connectWithPoolStats(this.pool, this.stats);
     let releaseError: Error | undefined;
     let transactionOpen = false;
     let lockHeld = false;
@@ -497,22 +538,37 @@ class PooledPostgresClient extends BasePostgresClient {
 
   close(): Promise<void> {
     clearInterval(this.statsTimer);
+    logPoolStats(this.pool, this.stats, "closing");
     return this.pool.end();
   }
 }
 
-function logPoolStats(pool: Pool, max: number): void {
-  getLogger().info(
-    {
-      event: "sdp_db_pool_stats",
-      service: process.env.K_SERVICE ?? null,
-      max,
-      total: pool.totalCount,
-      idle: pool.idleCount,
-      waiting: pool.waitingCount,
-    },
-    "database pool stats"
-  );
+function logPoolStats(
+  pool: Pool,
+  stats: PoolStats,
+  reason: "opened" | "interval" | "closing" | "checkout_failure" | "query_failure"
+): void {
+  recordPoolQueue(pool, stats);
+  try {
+    getLogger().info(
+      {
+        event: "sdp_db_pool_stats",
+        service: process.env.K_SERVICE ?? process.env.CLOUD_RUN_JOB ?? null,
+        reason,
+        max: stats.max,
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+        // Lifetime counters retain pressure that clears between interval samples.
+        peak_waiting: stats.peakWaiting,
+        checkout_failures: stats.checkoutFailures,
+        query_failures: stats.queryFailures,
+      },
+      "database pool stats"
+    );
+  } catch {
+    // Telemetry must not change database outcomes or prevent pool shutdown.
+  }
 }
 
 /**

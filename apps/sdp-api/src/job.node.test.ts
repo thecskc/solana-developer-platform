@@ -85,10 +85,6 @@ vi.mock("@/cron/pending-withdrawals", () => ({
   PENDING_WITHDRAWALS_MONITOR: "sdp-api-track-pending-withdrawals",
 }));
 
-vi.mock("@/cron/recurring-payments", () => ({
-  RECURRING_PAYMENTS_COLLECTION_MONITOR: "sdp-api-collect-recurring-payments",
-}));
-
 vi.mock("@/cron/rings-indexing", () => ({
   RINGS_INDEXING_MONITOR: "sdp-api-poll-rings-indexing",
 }));
@@ -97,7 +93,8 @@ vi.mock("@/cron/secret-retirements", () => ({
   SECRET_RETIREMENTS_MONITOR: "sdp-api-retire-secrets",
 }));
 
-vi.mock("@/db/client", () => ({
+vi.mock("@/db/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/db/client")>()),
   closeDatabasePools: vi.fn(async () => {}),
 }));
 
@@ -198,6 +195,7 @@ function deferred<T>() {
 
 describe("runCronJob", () => {
   beforeEach(() => {
+    vi.stubEnv("PG_POOL_MAX", undefined);
     vi.spyOn(process, "uptime").mockReturnValue(0);
     vi.mocked(solanaRpc.createRpc)
       .mockReset()
@@ -245,6 +243,7 @@ describe("runCronJob", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
@@ -322,6 +321,20 @@ describe("runCronJob", () => {
     expect(trackPendingTransfers).not.toHaveBeenCalled();
     expect(reconcileSponsorshipBudgets).not.toHaveBeenCalled();
   });
+
+  it.each(["", "0", "-1", "2.5", "10abc"])(
+    "rejects PG_POOL_MAX=%j before RPC warmup or any ticks",
+    async (raw) => {
+      vi.mocked(getProcessEnv).mockReturnValue(makeEnv({ PG_POOL_MAX: raw }));
+
+      await expect(runCronJob()).rejects.toThrow("Invalid PG_POOL_MAX");
+
+      expect(solanaRpc.createRpc).not.toHaveBeenCalled();
+      expect(waitForEgress).not.toHaveBeenCalled();
+      expect(trackPendingTransfers).not.toHaveBeenCalled();
+      expect(cleanupRetiredProviderCredentialSecrets).not.toHaveBeenCalled();
+    }
+  );
 
   it("fails fast when the Managed Reconciliation Cadence is missing, invalid, or cannot run the hourly task", async () => {
     vi.mocked(getProcessEnv).mockReturnValue(makeEnv({ SDP_MANAGED_RECONCILIATION_CRON: "" }));
@@ -526,6 +539,49 @@ describe("runCronJob", () => {
 
     expect(closeDatabasePools).toHaveBeenCalledTimes(1);
     expect(closeAllRedisClients).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the recurring monitor and job on row failures while completing later ticks", async () => {
+    vi.mocked(collectDueRecurringPayments).mockResolvedValueOnce({
+      recovered: 0,
+      collected: 1,
+      failed: 1,
+      skipped: 0,
+      refused: 0,
+    });
+
+    await expect(runCronJob()).rejects.toThrow("Recurring payment collection failed for 1 rows");
+
+    expect(collectDueRecurringPayments).toHaveBeenCalledTimes(SDP_ENVIRONMENTS.length);
+    expect(reconcileEarnVaultMovements).toHaveBeenCalledOnce();
+    expect(logEvent).toHaveBeenCalledWith(
+      "error",
+      expect.objectContaining({
+        monitor: "sdp-api-managed-collect-recurring-payments",
+        status: "error",
+      })
+    );
+    expect(closeDatabasePools).toHaveBeenCalledOnce();
+    expect(closeAllRedisClients).toHaveBeenCalledOnce();
+  });
+
+  it("does not fail the job for skipped or refused recurring rows", async () => {
+    vi.mocked(collectDueRecurringPayments).mockResolvedValue({
+      recovered: 0,
+      collected: 0,
+      failed: 0,
+      skipped: 1,
+      refused: 1,
+    });
+
+    await expect(runCronJob()).resolves.toBeUndefined();
+    expect(logEvent).toHaveBeenCalledWith(
+      "info",
+      expect.objectContaining({
+        monitor: "sdp-api-managed-collect-recurring-payments",
+        status: "ok",
+      })
+    );
   });
 
   it("fails the job on a ramp reconciliation error but still runs the ticks after it", async () => {
