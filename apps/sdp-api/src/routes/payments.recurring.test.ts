@@ -4025,9 +4025,17 @@ describe("Payments routes — recurring", () => {
       .prepare("UPDATE payment_recurring_payments SET source_custody_wallet_id = ? WHERE id = ?")
       .bind(DEFAULT_RECURRING_FIXTURE.sourceCustodyWalletId, recurringPayment.id)
       .run();
-    expect(
-      await collectDueRecurringPaymentsIn("sandbox", new Date(now.getTime() + 31 * 60 * 1000))
-    ).toMatchObject({ collected: 1, failed: 0, awaitingRetry: 0 });
+    const retryAt = new Date(now.getTime() + 31 * 60 * 1000);
+    vi.setSystemTime(retryAt);
+    try {
+      expect(await collectDueRecurringPaymentsIn("sandbox", retryAt)).toMatchObject({
+        collected: 1,
+        failed: 0,
+        awaitingRetry: 0,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("journals one automated collection attempt when runtime admission denies the wallet", async () => {
