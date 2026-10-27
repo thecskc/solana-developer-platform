@@ -37,6 +37,8 @@ export interface EnvField {
   optionsWhen?: (v: Values) => SelectOption[];
   /** Validation pattern source; tested in validate.ts. */
   pattern?: RegExp;
+  /** Additional validation for values that cannot be checked by a pattern alone. */
+  validate?: (value: string) => boolean;
   /** Visibility predicate over current values; absent ⇒ always visible. */
   visibleWhen?: (v: Values) => boolean;
   /**

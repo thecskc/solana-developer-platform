@@ -4,10 +4,23 @@ import { defaultValues } from "./generate";
 import { validateValues } from "./validate";
 
 test("database pool limit must be a positive integer when supplied", () => {
-  for (const PG_POOL_MAX of ["0", "-1", "2.5", "10abc"]) {
+  for (const PG_POOL_MAX of [
+    "0",
+    "-1",
+    "2.5",
+    "10abc",
+    "1e2",
+    "0x10",
+    "+10",
+    "01",
+    "9".repeat(309),
+    "9007199254740992",
+  ]) {
     assert.ok(validateValues({ ...defaultValues(), PG_POOL_MAX }).PG_POOL_MAX);
   }
-  assert.equal(validateValues({ ...defaultValues(), PG_POOL_MAX: "20" }).PG_POOL_MAX, undefined);
+  for (const PG_POOL_MAX of ["20", " 20 ", "9007199254740991"]) {
+    assert.equal(validateValues({ ...defaultValues(), PG_POOL_MAX }).PG_POOL_MAX, undefined);
+  }
 });
 
 test("required visible field with empty value reports an error", () => {

@@ -472,6 +472,12 @@ export interface PaymentRecurringPaymentsRepository {
     retryBefore: string;
     limit: number;
   }): Promise<CollectibleRecurringPaymentRow[]>;
+  /** Due cycles with a failed attempt still inside the retry cooldown. */
+  countCollectionPaymentsAwaitingRetry(params: {
+    environment: SdpEnvironment;
+    dueBefore: string;
+    retryBefore: string;
+  }): Promise<number>;
   createRecurringPayment(
     input: CreatePaymentRecurringPaymentInput
   ): Promise<PaymentRecurringPaymentRow | null>;

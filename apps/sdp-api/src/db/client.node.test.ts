@@ -22,8 +22,10 @@ interface MockPool {
 
 const pgMock = vi.hoisted(() => ({
   pools: [] as MockPool[],
-  poolQuery: async (): Promise<MockQueryResult> => ({ rows: [], rowCount: 0 }),
-  poolClientQuery: async (): Promise<MockQueryResult> => ({ rows: [], rowCount: 0 }),
+  poolClientQuery: async (_query: string | { text: string }): Promise<MockQueryResult> => ({
+    rows: [],
+    rowCount: 0,
+  }),
   poolEnd: async (): Promise<void> => {},
   poolConnect: async (): Promise<void> => {},
 }));
@@ -47,20 +49,15 @@ vi.mock("pg", () => {
       return this;
     }
 
-    async query(args: unknown): Promise<MockQueryResult> {
-      this.queries.push(args);
-      return pgMock.poolQuery();
-    }
-
     async connect(): Promise<
-      MockPoolClient & { query: (...args: unknown[]) => Promise<MockQueryResult> }
+      MockPoolClient & { query: (query: string | { text: string }) => Promise<MockQueryResult> }
     > {
       await pgMock.poolConnect();
       const client = {
         queries: [] as unknown[][],
-        query: async (...args: unknown[]): Promise<MockQueryResult> => {
-          client.queries.push(args);
-          return pgMock.poolClientQuery();
+        query: async (query: string | { text: string }): Promise<MockQueryResult> => {
+          client.queries.push([query]);
+          return pgMock.poolClientQuery(query);
         },
         release: vi.fn(),
       };
@@ -100,7 +97,6 @@ describe("database client connection management", () => {
     vi.stubEnv("CLOUD_RUN_JOB", undefined);
     await closeDatabasePools();
     pgMock.pools.length = 0;
-    pgMock.poolQuery = async () => ({ rows: [], rowCount: 0 });
     pgMock.poolClientQuery = async () => ({ rows: [], rowCount: 0 });
     pgMock.poolEnd = async () => {};
     pgMock.poolConnect = async () => {};
@@ -114,7 +110,7 @@ describe("database client connection management", () => {
 
   it("reuses one configured pool and starts independent Node queries concurrently", async () => {
     const pendingQueries: Array<() => void> = [];
-    pgMock.poolQuery = () =>
+    pgMock.poolClientQuery = () =>
       new Promise<MockQueryResult>((resolve) => {
         pendingQueries.push(() => resolve({ rows: [], rowCount: 0 }));
       });
@@ -149,7 +145,19 @@ describe("database client connection management", () => {
     expect(pgMock.pools[0]?.config).toMatchObject({ max: 25 });
   });
 
-  it.each(["", "0", "-1", "2.5", "10abc"])("refuses PG_POOL_MAX=%j", (raw) => {
+  it.each([
+    "",
+    "0",
+    "-1",
+    "2.5",
+    "10abc",
+    "1e2",
+    "0x10",
+    "+10",
+    "01",
+    "9".repeat(309),
+    "9007199254740992",
+  ])("refuses PG_POOL_MAX=%j", (raw) => {
     expect(() => resolvePoolMax(raw)).toThrow(`Invalid PG_POOL_MAX: ${JSON.stringify(raw)}`);
   });
 
@@ -215,7 +223,7 @@ describe("database client connection management", () => {
     }
   });
 
-  it.each(["query", "transaction", "locked transaction"])(
+  it.each(["unscoped query", "query", "transaction", "locked transaction"])(
     "logs a checkout failure between interval samples for a %s",
     async (operation) => {
       vi.useFakeTimers();
@@ -237,6 +245,7 @@ describe("database client connection management", () => {
         const identity = await import("./identity");
         const work = () => {
           switch (operation) {
+            case "unscoped query":
             case "query":
               return db.queryOne("SELECT 1");
             case "transaction":
@@ -249,7 +258,10 @@ describe("database client connection management", () => {
               );
           }
         };
-        const pending = identity.runWithSystemDatabaseIdentity("pool-test", work);
+        const pending =
+          operation === "unscoped query"
+            ? identity.runWithoutDatabaseIdentity("pool-test", work)
+            : identity.runWithSystemDatabaseIdentity("pool-test", work);
         const assertion = expect(pending).rejects.toBe(failure);
         await vi.advanceTimersByTimeAsync(5_000);
         await assertion;
@@ -261,6 +273,7 @@ describe("database client connection management", () => {
             waiting: 0,
             peak_waiting: 1,
             checkout_failures: 1,
+            query_failures: 0,
           }),
           "database pool stats"
         );
@@ -272,23 +285,95 @@ describe("database client connection management", () => {
     }
   );
 
-  it("logs direct pool query failures before the next sample without changing the error", async () => {
-    const failure = new Error("timeout exceeded when trying to connect");
-    pgMock.poolQuery = async () => {
-      throw failure;
-    };
-    const info = vi.spyOn(getLogger(), "info");
-    try {
-      await expect(
-        createDatabaseClient("postgresql://query-timeout/sdp").queryOne("SELECT 1")
-      ).rejects.toBe(failure);
-      expect(info).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: "query_failure", query_failures: 1 }),
-        "database pool stats"
-      );
-    } finally {
-      info.mockRestore();
+  it.each(["unscoped", "tenant", "system", "transaction", "locked transaction"])(
+    "records a SQL failure exactly once for %s work and preserves the error",
+    async (operation) => {
+      const failure = new Error("statement failed");
+      pgMock.poolClientQuery = async (query) => {
+        if (typeof query !== "string" && query.text === "SELECT broken") throw failure;
+        return { rows: [], rowCount: 0 };
+      };
+      const info = vi.spyOn(getLogger(), "info");
+      try {
+        const db = createDatabaseClient("postgresql://sql-failure/sdp");
+        const identity = await import("./identity");
+        const work = () => {
+          switch (operation) {
+            case "tenant":
+              return identity.runWithTenantDatabaseIdentity({ organizationId: "org_1" }, () =>
+                db.queryOne("SELECT broken")
+              );
+            case "system":
+              return identity.runWithSystemDatabaseIdentity("test-job", () =>
+                db.queryOne("SELECT broken")
+              );
+            case "transaction":
+              return db.transaction((tx) => tx.queryOne("SELECT broken"));
+            case "locked transaction":
+              return db.lockedTransactionWithPostCommit?.(
+                "lock",
+                (tx) => tx.queryOne("SELECT broken"),
+                async () => {}
+              );
+            default:
+              return identity.runWithoutDatabaseIdentity("test", () =>
+                db.queryOne("SELECT broken")
+              );
+          }
+        };
+        await expect(work()).rejects.toBe(failure);
+        const samples = info.mock.calls.filter(([event]) =>
+          JSON.stringify(event).includes('"reason":"query_failure"')
+        );
+        expect(samples).toHaveLength(1);
+        expect(samples[0]?.[0]).toMatchObject({ query_failures: 1, checkout_failures: 0 });
+        const client = pgMock.pools[0]?.connectedClients[0];
+        expect(client?.release).toHaveBeenCalledOnce();
+        if (operation !== "unscoped") {
+          expect(client?.queries).toContainEqual(["ROLLBACK"]);
+          expect(client?.release).toHaveBeenCalledWith(undefined);
+        } else {
+          expect(client?.release).toHaveBeenCalledWith(failure);
+        }
+      } finally {
+        info.mockRestore();
+      }
     }
+  );
+
+  it.each(["transaction", "locked transaction", "post-commit"])(
+    "does not count %s application errors as SQL failures",
+    async (operation) => {
+      const failure = new Error("application failure");
+      const info = vi.spyOn(getLogger(), "info");
+      try {
+        const db = createDatabaseClient("postgresql://application-failure/sdp");
+        const callback = async () => {
+          throw failure;
+        };
+        const work =
+          operation === "transaction"
+            ? db.transaction(callback)
+            : db.lockedTransactionWithPostCommit?.(
+                "lock",
+                operation === "post-commit" ? async () => {} : callback,
+                operation === "post-commit" ? callback : async () => {}
+              );
+        await expect(work).rejects.toBe(failure);
+        await closeDatabasePools();
+        expect(info).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: "closing", query_failures: 0, checkout_failures: 0 }),
+          "database pool stats"
+        );
+      } finally {
+        info.mockRestore();
+      }
+    }
+  );
+
+  it("accepts positive decimal pool limits and trims surrounding whitespace", () => {
+    expect(resolvePoolMax(" 20 ")).toBe(20);
+    expect(resolvePoolMax("9007199254740991")).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it("keeps query outcomes and shutdown intact when telemetry throws", async () => {

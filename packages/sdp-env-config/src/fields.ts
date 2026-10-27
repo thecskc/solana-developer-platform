@@ -1,3 +1,4 @@
+import { isValidPoolMax } from "./pool-max";
 import type { EnvField, SectionMeta, SelectOption, Values } from "./types";
 
 export const SECTIONS: SectionMeta[] = [
@@ -144,7 +145,7 @@ export const FIELDS: EnvField[] = [
     kind: "text",
     label: "Maximum database connections per process",
     defaultValue: "10",
-    pattern: /^[1-9]\d*$/,
+    validate: isValidPoolMax,
     help: "Positive integer. Allow for all API replicas and worker processes when choosing a limit.",
   },
 

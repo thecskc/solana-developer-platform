@@ -3504,6 +3504,7 @@ describe("Payments routes — recurring", () => {
         recovered: 0,
         collected: 0,
         failed: 0,
+        awaitingRetry: 0,
         skipped: 0,
         refused: 1,
       });
@@ -3514,6 +3515,7 @@ describe("Payments routes — recurring", () => {
         recovered: 0,
         collected: 0,
         failed: 0,
+        awaitingRetry: 0,
         skipped: 0,
         refused: 0,
       });
@@ -3567,6 +3569,7 @@ describe("Payments routes — recurring", () => {
         recovered: 0,
         collected: 0,
         failed: 0,
+        awaitingRetry: 0,
         skipped: 0,
         refused: 1,
       });
@@ -3975,6 +3978,7 @@ describe("Payments routes — recurring", () => {
       recovered: 0,
       collected: 0,
       failed: 1,
+      awaitingRetry: 1,
       skipped: 0,
       refused: 0,
     });
@@ -3984,6 +3988,7 @@ describe("Payments routes — recurring", () => {
       recovered: 0,
       collected: 0,
       failed: 0,
+      awaitingRetry: 1,
       skipped: 0,
       refused: 0,
     });
@@ -4013,6 +4018,16 @@ describe("Payments routes — recurring", () => {
     ]);
     expect(attempts.results[0]?.error).toContain("source wallet is unresolved");
     expect(signAndSendMock).toHaveBeenCalledTimes(2);
+
+    // Repair the source during cooldown: it must not retry early, but once the
+    // cutoff is reached, successful collection clears the persisted signal.
+    await getDb(env)
+      .prepare("UPDATE payment_recurring_payments SET source_custody_wallet_id = ? WHERE id = ?")
+      .bind(DEFAULT_RECURRING_FIXTURE.sourceCustodyWalletId, recurringPayment.id)
+      .run();
+    expect(
+      await collectDueRecurringPaymentsIn("sandbox", new Date(now.getTime() + 31 * 60 * 1000))
+    ).toMatchObject({ collected: 1, failed: 0, awaitingRetry: 0 });
   });
 
   it("journals one automated collection attempt when runtime admission denies the wallet", async () => {
@@ -4047,8 +4062,8 @@ describe("Payments routes — recurring", () => {
         collectDueRecurringPaymentsIn("sandbox", now),
       ]);
       expect(runs).toEqual([
-        { recovered: 0, collected: 0, failed: 0, skipped: 1, refused: 0 },
-        { recovered: 0, collected: 0, failed: 0, skipped: 1, refused: 0 },
+        { recovered: 0, collected: 0, failed: 0, awaitingRetry: 1, skipped: 1, refused: 0 },
+        { recovered: 0, collected: 0, failed: 0, awaitingRetry: 1, skipped: 1, refused: 0 },
       ]);
       expect(
         await collectDueRecurringPaymentsIn("sandbox", new Date(now.getTime() + 60 * 1000))
@@ -4056,6 +4071,7 @@ describe("Payments routes — recurring", () => {
         recovered: 0,
         collected: 0,
         failed: 0,
+        awaitingRetry: 1,
         skipped: 0,
         refused: 0,
       });

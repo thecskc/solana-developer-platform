@@ -30,5 +30,10 @@ export async function runRecurringPaymentsCollectionTick(env: Env): Promise<void
     if (result.failed > 0) {
       throw new Error(`Recurring payment collection failed for ${result.failed} rows`);
     }
+    if (result.awaitingRetry > 0) {
+      throw new Error(
+        `Recurring payment collection has ${result.awaitingRetry} due cycles awaiting retry`
+      );
+    }
   });
 }

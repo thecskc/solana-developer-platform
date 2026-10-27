@@ -215,7 +215,14 @@ describe("runCronJob", () => {
       .mockResolvedValue({ scanned: 0, repaired: 0 });
     vi.mocked(collectDueRecurringPayments)
       .mockReset()
-      .mockResolvedValue({ recovered: 0, collected: 0, failed: 0, skipped: 0, refused: 0 });
+      .mockResolvedValue({
+        recovered: 0,
+        collected: 0,
+        failed: 0,
+        awaitingRetry: 0,
+        skipped: 0,
+        refused: 0,
+      });
     vi.mocked(pollRingsIndexing).mockReset().mockResolvedValue(undefined);
     vi.mocked(trackPendingDeposits).mockReset().mockResolvedValue(undefined);
     vi.mocked(trackPendingWithdrawals).mockReset().mockResolvedValue(undefined);
@@ -546,6 +553,7 @@ describe("runCronJob", () => {
       recovered: 0,
       collected: 1,
       failed: 1,
+      awaitingRetry: 0,
       skipped: 0,
       refused: 0,
     });
@@ -565,11 +573,34 @@ describe("runCronJob", () => {
     expect(closeAllRedisClients).toHaveBeenCalledOnce();
   });
 
+  it("keeps the managed monitor in error during cooldown and still closes pools", async () => {
+    vi.mocked(collectDueRecurringPayments).mockResolvedValueOnce({
+      recovered: 0,
+      collected: 0,
+      failed: 0,
+      awaitingRetry: 1,
+      skipped: 0,
+      refused: 0,
+    });
+    await expect(runCronJob()).rejects.toThrow("1 due cycles awaiting retry");
+    expect(logEvent).toHaveBeenCalledWith(
+      "error",
+      expect.objectContaining({
+        monitor: "sdp-api-managed-collect-recurring-payments",
+        status: "error",
+      })
+    );
+    expect(reconcileEarnVaultMovements).toHaveBeenCalledOnce();
+    expect(closeDatabasePools).toHaveBeenCalledOnce();
+    expect(closeAllRedisClients).toHaveBeenCalledOnce();
+  });
+
   it("does not fail the job for skipped or refused recurring rows", async () => {
     vi.mocked(collectDueRecurringPayments).mockResolvedValue({
       recovered: 0,
       collected: 0,
       failed: 0,
+      awaitingRetry: 0,
       skipped: 1,
       refused: 1,
     });

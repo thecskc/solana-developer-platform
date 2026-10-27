@@ -33,6 +33,11 @@
       "types": "./src/validate.ts",
       "import": "./src/validate.ts",
       "default": "./src/validate.ts"
+    },
+    "./pool-max": {
+      "types": "./src/pool-max.ts",
+      "import": "./src/pool-max.ts",
+      "default": "./src/pool-max.ts"
     }
   },
   "scripts": {

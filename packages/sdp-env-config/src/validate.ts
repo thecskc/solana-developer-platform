@@ -46,6 +46,7 @@ function validateField(f: EnvField, values: Values): string | undefined {
   // Reject control characters that could inject additional .env lines.
   if (/[\r\n\0]/.test(value)) return `${f.label} must be a single line`;
   if (f.pattern && !f.pattern.test(value)) return `${f.label} has an invalid format`;
+  if (f.validate && !f.validate(value)) return `${f.label} has an invalid value`;
   return optionMembershipError(f, values, selected);
 }
 

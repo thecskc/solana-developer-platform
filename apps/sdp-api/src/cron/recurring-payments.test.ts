@@ -19,7 +19,7 @@ describe("runRecurringPaymentsCollection", () => {
     vi.spyOn(collectRecurringPaymentsModule, "collectDueRecurringPayments").mockImplementation(
       async () => {
         scopedEnvironments.push(currentClusterScope().environment);
-        return { recovered: 0, collected: 0, failed: 0, skipped: 0, refused: 0 };
+        return { recovered: 0, collected: 0, failed: 0, awaitingRetry: 0, skipped: 0, refused: 0 };
       }
     );
     const runs: Promise<unknown>[] = [];
@@ -42,8 +42,22 @@ describe("runRecurringPaymentsCollection", () => {
   it.each([false, true])("reports row failures with observability=%s", async (monitored) => {
     const collect = vi
       .spyOn(collectRecurringPaymentsModule, "collectDueRecurringPayments")
-      .mockResolvedValue({ recovered: 0, collected: 1, failed: 0, skipped: 0, refused: 0 })
-      .mockResolvedValueOnce({ recovered: 0, collected: 0, failed: 1, skipped: 0, refused: 0 });
+      .mockResolvedValue({
+        recovered: 0,
+        collected: 1,
+        failed: 0,
+        awaitingRetry: 0,
+        skipped: 0,
+        refused: 0,
+      })
+      .mockResolvedValueOnce({
+        recovered: 0,
+        collected: 0,
+        failed: 1,
+        awaitingRetry: 0,
+        skipped: 0,
+        refused: 0,
+      });
     const runs: Promise<unknown>[] = [];
     const bg: BackgroundRunner = {
       run: (promise) => runs.push(promise),
@@ -60,6 +74,39 @@ describe("runRecurringPaymentsCollection", () => {
     await expect(Promise.all(runs)).rejects.toThrow(
       "Recurring payment collection failed for 1 rows"
     );
+    expect(collect).toHaveBeenCalledTimes(SDP_ENVIRONMENTS.length);
+  });
+  it.each([false, true])("reports cooldown failures with observability=%s", async (monitored) => {
+    const collect = vi
+      .spyOn(collectRecurringPaymentsModule, "collectDueRecurringPayments")
+      .mockResolvedValue({
+        recovered: 0,
+        collected: 0,
+        failed: 0,
+        awaitingRetry: 0,
+        skipped: 0,
+        refused: 0,
+      })
+      .mockResolvedValueOnce({
+        recovered: 0,
+        collected: 0,
+        failed: 0,
+        awaitingRetry: 1,
+        skipped: 0,
+        refused: 0,
+      });
+    const runs: Promise<unknown>[] = [];
+    const bg: BackgroundRunner = {
+      run: (promise) => runs.push(promise),
+      awaitAll: async () => {},
+      draining: false,
+    };
+    runRecurringPaymentsCollection({
+      env,
+      bg,
+      observability: monitored ? noopObservability : undefined,
+    });
+    await expect(Promise.all(runs)).rejects.toThrow("1 due cycles awaiting retry");
     expect(collect).toHaveBeenCalledTimes(SDP_ENVIRONMENTS.length);
   });
 });
