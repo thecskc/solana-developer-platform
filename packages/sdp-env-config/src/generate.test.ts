@@ -32,6 +32,14 @@ test("UI-only selector keys are never emitted", () => {
   assert.doesNotMatch(env, /^POSTGRES_PASSWORD_MODE=/m);
 });
 
+test("database pool limit survives generation for bundled and external databases", () => {
+  for (const DATABASE_MODE of ["bundled", "external"]) {
+    const env = generateEnv({ ...defaultValues(), DATABASE_MODE, PG_POOL_MAX: "20" });
+    assert.match(env, /^PG_POOL_MAX=20$/m);
+  }
+  assert.match(generateEnv(defaultValues()), /^PG_POOL_MAX=10$/m);
+});
+
 test("deployment mode is emitted as the self_hosted constant", () => {
   const env = generateEnv(defaultValues());
   assert.match(env, /^SDP_DEPLOYMENT_MODE=self_hosted$/m);

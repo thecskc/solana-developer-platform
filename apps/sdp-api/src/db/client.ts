@@ -1,4 +1,6 @@
-import { Pool, type QueryResult, types } from "pg";
+import { isValidPoolMax } from "@sdp/env-config/pool-max";
+import { Pool, type PoolClient, type QueryResult, types } from "pg";
+import { z } from "zod";
 import {
   currentDatabaseIdentity,
   type DatabaseIdentity,
@@ -75,8 +77,46 @@ type Queryable = {
 
 const pooledClients = new Map<string, PooledPostgresClient>();
 
+const DEFAULT_POOL_MAX = 10;
+const POOL_STATS_INTERVAL_MS = 15_000;
+
+interface PoolStats {
+  max: number;
+  peakWaiting: number;
+  checkoutFailures: number;
+  queryFailures: number;
+}
+
+function recordPoolQueue(pool: Pool, stats: PoolStats): void {
+  stats.peakWaiting = Math.max(stats.peakWaiting, pool.waitingCount);
+}
+
+async function connectWithPoolStats(pool: Pool, stats: PoolStats): Promise<PoolClient> {
+  try {
+    const pending = pool.connect();
+    recordPoolQueue(pool, stats);
+    return await pending;
+  } catch (error) {
+    stats.checkoutFailures += 1;
+    logPoolStats(pool, stats, "checkout_failure");
+    throw error;
+  }
+}
+
+const poolMaxSchema = z.string().trim().refine(isValidPoolMax).transform(Number);
+
+export function resolvePoolMax(raw: string | undefined = process.env.PG_POOL_MAX): number {
+  if (raw === undefined) {
+    return DEFAULT_POOL_MAX;
+  }
+  const parsed = poolMaxSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(`Invalid PG_POOL_MAX: ${JSON.stringify(raw)}`);
+  }
+  return parsed.data;
+}
+
 const NODE_POOL_OPTIONS = {
-  max: 10,
   // Bounds every statement and every idle-in-transaction session (HOO-1918):
   // a hung query fails its request instead of holding its Idempotency-Key and
   // a pooled connection. Generous for OLTP. `job.ts` shares this pool, so a
@@ -309,23 +349,52 @@ async function beginWithDatabaseIdentity(
   await client.query({ text: `BEGIN; ${databaseIdentityConfigStatement(identity).text}` });
 }
 
+/** Record SQL failures at the statement boundary, including transaction control SQL. */
+class PoolStatsQueryable implements Queryable {
+  constructor(
+    private readonly client: PoolClient,
+    private readonly pool: Pool,
+    private readonly stats: PoolStats
+  ) {}
+
+  async query(args: QueryArgs | string): Promise<QueryResult> {
+    try {
+      return await this.client.query(args);
+    } catch (error) {
+      this.stats.queryFailures += 1;
+      logPoolStats(this.pool, this.stats, "query_failure");
+      throw error;
+    }
+  }
+}
+
 /**
- * Queryable for statements issued outside an explicit transaction. When an
- * identity is present, the statement runs in its own short transaction so the
- * transaction-local identity GUCs cover it; without one, the statement goes
- * straight to the pool and RLS fails closed.
+ * Explicit checkout separates connection failures from SQL failures. Identity
+ * queries use a short transaction so SET LOCAL cannot leak across callers.
  */
 class IdentityStampingPoolQueryable implements Queryable {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly stats: PoolStats
+  ) {}
 
   async query(args: QueryArgs): Promise<QueryResult> {
     const identity = currentDatabaseIdentity();
+    const connection = await connectWithPoolStats(this.pool, this.stats);
+    const client = new PoolStatsQueryable(connection, this.pool, this.stats);
+    let releaseError: Error | undefined;
     if (!identity || identity.kind === "none") {
-      return this.pool.query(args);
+      try {
+        return await client.query(args);
+      } catch (error) {
+        // Match pg's pool.query behavior: discard a client after a failed query.
+        releaseError = error instanceof Error ? error : new Error(String(error));
+        throw error;
+      } finally {
+        connection.release(releaseError);
+      }
     }
 
-    const client = await this.pool.connect();
-    let releaseError: Error | undefined;
     try {
       await beginWithDatabaseIdentity(client, identity);
       const result = await client.query(args);
@@ -340,21 +409,33 @@ class IdentityStampingPoolQueryable implements Queryable {
       }
       throw error;
     } finally {
-      client.release(releaseError);
+      connection.release(releaseError);
     }
   }
 }
 
 class PooledPostgresClient extends BasePostgresClient {
   private readonly pool: Pool;
+  private readonly stats: PoolStats;
+  private readonly statsTimer: NodeJS.Timeout;
 
   constructor(connectionString: string) {
+    const max = resolvePoolMax();
     const pool = new Pool({
       connectionString,
       ...NODE_POOL_OPTIONS,
+      max,
     });
-    super(new IdentityStampingPoolQueryable(pool));
+    const stats: PoolStats = { max, peakWaiting: 0, checkoutFailures: 0, queryFailures: 0 };
+    super(new IdentityStampingPoolQueryable(pool, stats));
     this.pool = pool;
+    this.stats = stats;
+    logPoolStats(pool, stats, "opened");
+    this.statsTimer = setInterval(
+      () => logPoolStats(pool, stats, "interval"),
+      POOL_STATS_INTERVAL_MS
+    );
+    this.statsTimer.unref();
 
     // Idle pool errors are EventEmitter errors; without a listener Node treats
     // them as uncaught exceptions and terminates the process.
@@ -364,7 +445,8 @@ class PooledPostgresClient extends BasePostgresClient {
   }
 
   async transaction<T>(callback: (tx: DatabaseExecutor) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
+    const connection = await connectWithPoolStats(this.pool, this.stats);
+    const client = new PoolStatsQueryable(connection, this.pool, this.stats);
     let releaseError: Error | undefined;
 
     try {
@@ -382,7 +464,7 @@ class PooledPostgresClient extends BasePostgresClient {
       }
       throw error;
     } finally {
-      client.release(releaseError);
+      connection.release(releaseError);
     }
   }
 
@@ -393,7 +475,8 @@ class PooledPostgresClient extends BasePostgresClient {
     afterRollback?: (result: T) => Promise<void>,
     options?: { wait?: boolean }
   ): Promise<T> {
-    const client = await this.pool.connect();
+    const connection = await connectWithPoolStats(this.pool, this.stats);
+    const client = new PoolStatsQueryable(connection, this.pool, this.stats);
     let releaseError: Error | undefined;
     let transactionOpen = false;
     let lockHeld = false;
@@ -470,12 +553,42 @@ class PooledPostgresClient extends BasePostgresClient {
             unlockError instanceof Error ? unlockError : new Error(String(unlockError));
         }
       }
-      client.release(releaseError);
+      connection.release(releaseError);
     }
   }
 
   close(): Promise<void> {
+    clearInterval(this.statsTimer);
+    logPoolStats(this.pool, this.stats, "closing");
     return this.pool.end();
+  }
+}
+
+function logPoolStats(
+  pool: Pool,
+  stats: PoolStats,
+  reason: "opened" | "interval" | "closing" | "checkout_failure" | "query_failure"
+): void {
+  recordPoolQueue(pool, stats);
+  try {
+    getLogger().info(
+      {
+        event: "sdp_db_pool_stats",
+        service: process.env.K_SERVICE ?? process.env.CLOUD_RUN_JOB ?? null,
+        reason,
+        max: stats.max,
+        total: pool.totalCount,
+        idle: pool.idleCount,
+        waiting: pool.waitingCount,
+        // Lifetime counters retain pressure that clears between interval samples.
+        peak_waiting: stats.peakWaiting,
+        checkout_failures: stats.checkoutFailures,
+        query_failures: stats.queryFailures,
+      },
+      "database pool stats"
+    );
+  } catch {
+    // Telemetry must not change database outcomes or prevent pool shutdown.
   }
 }
 

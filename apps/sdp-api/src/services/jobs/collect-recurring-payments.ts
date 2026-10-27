@@ -52,13 +52,15 @@ export interface CollectDueRecurringPaymentsResult {
   recovered: number;
   collected: number;
   failed: number;
+  /** Due cycles with persisted failures that are waiting for the retry cooldown. */
+  awaitingRetry: number;
   skipped: number;
   /** Rows money admission refused (HOO-1955): a period skipped or an operation reverted. */
   refused: number;
 }
 
 function emptyResult(): CollectDueRecurringPaymentsResult {
-  return { recovered: 0, collected: 0, failed: 0, skipped: 0, refused: 0 };
+  return { recovered: 0, collected: 0, failed: 0, awaitingRetry: 0, skipped: 0, refused: 0 };
 }
 
 function admissionFor(
@@ -413,6 +415,14 @@ export async function collectDueRecurringPayments(
     limit,
   });
   await processRowsConcurrently(result, duePayments, "collected", (row) => collectRow(env, row));
+
+  // Read after processing so successful recovery clears the signal. This read
+  // observes persisted failures without changing eligibility or spending again.
+  result.awaitingRetry = await recurringPaymentsRepo.countCollectionPaymentsAwaitingRetry({
+    environment,
+    dueBefore,
+    retryBefore,
+  });
 
   return result;
 }

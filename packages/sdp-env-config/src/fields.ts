@@ -1,3 +1,4 @@
+import { isValidPoolMax } from "./pool-max";
 import type { EnvField, SectionMeta, SelectOption, Values } from "./types";
 
 export const SECTIONS: SectionMeta[] = [
@@ -136,6 +137,16 @@ export const FIELDS: EnvField[] = [
     help: "External Postgres connection string, e.g. postgresql://…@host:5432/dbname",
     pattern: /^postgres(ql)?:\/\//,
     visibleWhen: isProvider("DATABASE_MODE", "external"),
+  },
+
+  {
+    key: "PG_POOL_MAX",
+    section: "database",
+    kind: "text",
+    label: "Maximum database connections per process",
+    defaultValue: "10",
+    validate: isValidPoolMax,
+    help: "Positive integer. Allow for all API replicas and worker processes when choosing a limit.",
   },
 
   // Cache

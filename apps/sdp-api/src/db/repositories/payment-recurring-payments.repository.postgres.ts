@@ -420,6 +420,33 @@ export function createPostgresPaymentRecurringPaymentsRepository(
         .all<Record<string, unknown>>();
       return result.rows.map(mapCollectibleRecurringPaymentRow);
     },
+    async countCollectionPaymentsAwaitingRetry({ environment, dueBefore, retryBefore }) {
+      const row = await db
+        .prepare(
+          `SELECT COUNT(*)::int AS total FROM payment_recurring_payments rp
+           JOIN projects p ON p.id = rp.project_id
+          WHERE p.environment = ? AND rp.status = 'active' AND rp.next_collection_due_at IS NOT NULL AND rp.next_collection_due_at <= ?
+            AND NOT EXISTS (SELECT 1 FROM payment_subscription_collection_attempts active_attempt
+              WHERE active_attempt.organization_id = rp.organization_id AND active_attempt.project_id = rp.project_id
+                AND active_attempt.subscription_id = rp.subscription_id AND active_attempt.due_at = rp.next_collection_due_at
+                AND active_attempt.status = ANY(?::text[]))
+            AND EXISTS (SELECT 1 FROM payment_subscription_collection_attempts failed_attempt
+              WHERE failed_attempt.organization_id = rp.organization_id AND failed_attempt.project_id = rp.project_id
+                AND failed_attempt.subscription_id = rp.subscription_id AND failed_attempt.due_at = rp.next_collection_due_at
+                AND failed_attempt.status = 'failed' AND failed_attempt.updated_at > ?)`
+        )
+        .bind(
+          environment,
+          dueBefore,
+          [...COLLECTION_ATTEMPT_STATUSES_BLOCKING_NEW_CYCLE],
+          retryBefore
+        )
+        .first<{ total: number }>();
+      if (row === null) {
+        throw new AppError("INTERNAL_ERROR", "Recurring payment retry count query returned no row");
+      }
+      return row.total;
+    },
     async createRecurringPayment(input: CreatePaymentRecurringPaymentInput) {
       await db
         .prepare(

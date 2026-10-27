@@ -16,6 +16,7 @@ import type { Observability } from "@/runtime/observability";
 export interface Env extends ManagedRpcEnv {
   // Runtime data services
   DATABASE_URL?: string;
+  PG_POOL_MAX?: string;
   REDIS_URL?: string;
 
   // Cloud Run services disable embedded cron by default so the dedicated job

@@ -17,11 +17,14 @@ import { PENDING_TRANSFERS_MONITOR } from "@/cron/pending-transfers";
 import { PENDING_WITHDRAWALS_MONITOR } from "@/cron/pending-withdrawals";
 import { PROVIDER_CREDENTIAL_SECRET_CLEANUP_MONITOR } from "@/cron/provider-credential-secret-cleanup";
 import { RAMP_TRANSFERS_MONITOR } from "@/cron/ramp-transfers";
-import { RECURRING_PAYMENTS_COLLECTION_MONITOR } from "@/cron/recurring-payments";
+import {
+  RECURRING_PAYMENTS_COLLECTION_MONITOR,
+  runRecurringPaymentsCollectionTick,
+} from "@/cron/recurring-payments";
 import { RINGS_INDEXING_MONITOR } from "@/cron/rings-indexing";
 import { runWithCronRunEvent } from "@/cron/run-event";
 import { SECRET_RETIREMENTS_MONITOR } from "@/cron/secret-retirements";
-import { closeDatabasePools } from "@/db/client";
+import { closeDatabasePools, resolvePoolMax } from "@/db/client";
 import { runWithSystemDatabaseIdentity } from "@/db/identity";
 import {
   assertSdpReleaseChannelConfigured,
@@ -36,7 +39,6 @@ import { installOutboundDispatcher } from "@/runtime/outbound-dispatcher";
 import { assertSigningProviderAllowed } from "@/services/adapters/signing";
 import { assertCustodyEncryptionScheme } from "@/services/custody-cipher/cipher-router";
 import { cleanupRetiredProviderCredentialSecrets } from "@/services/jobs/cleanup-provider-credential-secrets";
-import { collectDueRecurringPayments } from "@/services/jobs/collect-recurring-payments";
 import { detectOrphanedEarnSplitSwaps } from "@/services/jobs/detect-orphaned-earn-split-swaps";
 import { waitForEgress } from "@/services/jobs/egress-warmup";
 import { pollRingsIndexing } from "@/services/jobs/poll-rings-indexing";
@@ -131,6 +133,7 @@ export async function runCronJob(): Promise<void> {
   if (!env.REDIS_URL?.trim()) {
     throw new Error("REDIS_URL is required for the reconciliation job");
   }
+  resolvePoolMax(env.PG_POOL_MAX);
   assertCustodyEncryptionScheme(env);
   getManagedReconciliationCron(env);
   const timeoutSeconds = getManagedReconciliationTimeoutSeconds(env);
@@ -215,9 +218,7 @@ export async function runCronJob(): Promise<void> {
         await collect(monitored(RAMP_TRANSFERS_MONITOR, () => reconcileRampTransfers(env)));
         await collect(
           monitored(RECURRING_PAYMENTS_COLLECTION_MONITOR, () =>
-            runInEachClusterScope(async () => {
-              await collectDueRecurringPayments(env, new Date());
-            })
+            runRecurringPaymentsCollectionTick(env)
           )
         );
         if (privateChannelsEnabled) {

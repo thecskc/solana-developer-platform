@@ -22,6 +22,7 @@ interface MockState {
   listStaleUpdatePayments: ReturnType<typeof vi.fn>;
   listRecoverableCollectionPayments: ReturnType<typeof vi.fn>;
   listDueCollectionPayments: ReturnType<typeof vi.fn>;
+  countCollectionPaymentsAwaitingRetry: ReturnType<typeof vi.fn>;
   checkMoneyStart: ReturnType<typeof vi.fn>;
   rows: {
     due: PaymentRecurringPaymentRow[];
@@ -42,6 +43,7 @@ const mocks = vi.hoisted<MockState>(() => ({
   listStaleUpdatePayments: vi.fn(),
   listRecoverableCollectionPayments: vi.fn(),
   listDueCollectionPayments: vi.fn(),
+  countCollectionPaymentsAwaitingRetry: vi.fn(),
   checkMoneyStart: vi.fn(),
   rows: {
     due: [],
@@ -69,6 +71,7 @@ vi.mock("@/db/repositories/payment-recurring-payments.repository.postgres", () =
     listStaleUpdatePayments: mocks.listStaleUpdatePayments,
     listRecoverableCollectionPayments: mocks.listRecoverableCollectionPayments,
     listDueCollectionPayments: mocks.listDueCollectionPayments,
+    countCollectionPaymentsAwaitingRetry: mocks.countCollectionPaymentsAwaitingRetry,
   }),
 }));
 
@@ -156,6 +159,7 @@ describe("collectDueRecurringPayments", () => {
   });
 
   beforeEach(() => {
+    mocks.countCollectionPaymentsAwaitingRetry.mockReset().mockResolvedValue(0);
     mocks.checkMoneyStart.mockReset().mockResolvedValue({ admitted: true });
     mocks.activateRecurringPayment.mockReset();
     mocks.cancelRecurringPayment.mockReset();
@@ -198,7 +202,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date("2026-07-01T12:30:00Z"));
 
-    expect(result).toEqual({ recovered: 2, collected: 1, failed: 0, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 2,
+      collected: 1,
+      failed: 0,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(activateRecurringPayment).toHaveBeenCalledWith(
       expect.objectContaining({ recurringPayment: lifecycle })
     );
@@ -227,7 +238,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date());
 
-    expect(result).toEqual({ recovered: 2, collected: 0, failed: 0, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 2,
+      collected: 0,
+      failed: 0,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(cancelRecurringPayment).toHaveBeenCalledWith(
       expect.objectContaining({ recurringPayment: canceling })
     );
@@ -242,7 +260,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date());
 
-    expect(result).toEqual({ recovered: 1, collected: 0, failed: 0, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 1,
+      collected: 0,
+      failed: 0,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(collectRecurringPayment).toHaveBeenCalledWith(
       expect.objectContaining({ recurringPayment: canceled })
     );
@@ -259,11 +284,26 @@ describe("collectDueRecurringPayments", () => {
         mocks.listStaleUpdatePayments,
         mocks.listRecoverableCollectionPayments,
         mocks.listDueCollectionPayments,
+        mocks.countCollectionPaymentsAwaitingRetry,
       ]) {
         expect(read).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ environment }));
       }
     }
   );
+
+  it("reports persisted failures in cooldown without attempting collection", async () => {
+    mocks.countCollectionPaymentsAwaitingRetry.mockResolvedValue(2);
+
+    const result = await collectDueRecurringPaymentsIn("sandbox", new Date("2026-07-01T12:30:00Z"));
+
+    expect(result).toMatchObject({ failed: 0, awaitingRetry: 2, collected: 0 });
+    expect(collectRecurringPayment).not.toHaveBeenCalled();
+    expect(mocks.countCollectionPaymentsAwaitingRetry).toHaveBeenCalledExactlyOnceWith({
+      environment: "sandbox",
+      dueBefore: "2026-07-01T12:30:00.000Z",
+      retryBefore: "2026-07-01T12:00:00.000Z",
+    });
+  });
 
   it("uses product batch-size and retry-after controls", async () => {
     await collectDueRecurringPaymentsIn("sandbox", new Date("2026-07-01T12:30:00Z"));
@@ -282,7 +322,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date());
 
-    expect(result).toEqual({ recovered: 0, collected: 0, failed: 0, skipped: 1, refused: 0 });
+    expect(result).toEqual({
+      recovered: 0,
+      collected: 0,
+      failed: 0,
+      awaitingRetry: 0,
+      skipped: 1,
+      refused: 0,
+    });
   });
 
   it("collects same-organization rows serially while fanning out across organizations", async () => {
@@ -312,7 +359,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date());
 
-    expect(result).toEqual({ recovered: 0, collected: 5, failed: 0, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 0,
+      collected: 5,
+      failed: 0,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(orgMaxInFlight).toBe(1);
     expect(globalMaxInFlight).toBeGreaterThan(1);
   });
@@ -323,7 +377,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date());
 
-    expect(result).toEqual({ recovered: 0, collected: 0, failed: 1, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 0,
+      collected: 0,
+      failed: 1,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(collectRecurringPayment).not.toHaveBeenCalled();
     expect(mocks.journalAutomatedCollectionFailure).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledWith(
@@ -348,7 +409,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date());
 
-    expect(result).toEqual({ recovered: 0, collected: 0, failed: 1, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 0,
+      collected: 0,
+      failed: 1,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(mocks.findOperationalWalletById).toHaveBeenCalledWith({
       organizationId: "org_1",
       projectId: "proj_1",
@@ -389,7 +457,14 @@ describe("collectDueRecurringPayments", () => {
 
     const result = await collectDueRecurringPaymentsIn("sandbox", new Date("2026-07-01T12:30:00Z"));
 
-    expect(result).toEqual({ recovered: 0, collected: 0, failed: 0, skipped: 0, refused: 0 });
+    expect(result).toEqual({
+      recovered: 0,
+      collected: 0,
+      failed: 0,
+      awaitingRetry: 0,
+      skipped: 0,
+      refused: 0,
+    });
     expect(collectRecurringPayment).not.toHaveBeenCalled();
     expect(mocks.journalAutomatedCollectionFailure).not.toHaveBeenCalled();
     expect(mocks.listStaleUpdatePayments).toHaveBeenCalledWith({
