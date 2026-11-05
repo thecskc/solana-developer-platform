@@ -135,7 +135,8 @@ export function assertCronConfig(
 /**
  * The Environments a definition is registered for: one per Environment for `cluster`, a single
  * environment-less registration for `global`. A deployment that admits no production project
- * registers no production work.
+ * still registers production finishers: signed or funded movements must settle (ADR 0002),
+ * including exits admitted after the deployment policy changes.
  *
  * @param definition - The definition to register.
  * @param env - Process environment naming whether production projects are admitted.
@@ -147,7 +148,7 @@ function registrationEnvironments(
 ): readonly (SdpEnvironment | null)[] {
   switch (definition.scope) {
     case "cluster":
-      return productionProjectsAllowed(env)
+      return productionProjectsAllowed(env) || definition.effect === "finishes"
         ? SDP_ENVIRONMENTS
         : SDP_ENVIRONMENTS.filter((environment) => environment !== "production");
     case "global":

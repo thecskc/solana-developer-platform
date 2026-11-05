@@ -11,7 +11,10 @@ import { getDb } from "@/db/client";
 import { parsePostgresJson } from "@/db/postgres-utils";
 import { getAuth } from "@/lib/auth";
 import { AppError, badRequest, notFound } from "@/lib/errors";
-import { projectOrganizationSettings } from "@/lib/organization-access";
+import {
+  organizationSettingsForResponse,
+  projectOrganizationSettings,
+} from "@/lib/organization-access";
 import { success } from "@/lib/response";
 import type { ValidatedBodyContext } from "@/middleware/validate";
 import { AuditService } from "@/services/audit.service";
@@ -66,14 +69,15 @@ function parseOrganizationStatus(value: string): OrganizationStatus {
   throw new AppError("INTERNAL_ERROR", `Organization status '${value}' is invalid`);
 }
 
-export function toOrganizationResponse(row: OrganizationRow): Organization {
+export function toOrganizationResponse(row: OrganizationRow, env: Env): Organization {
+  const settings = parseOrganizationSettings(row.settings);
   return {
     id: row.id,
     name: row.name,
     slug: row.slug,
     tier: parseOrganizationTier(row.tier),
     status: parseOrganizationStatus(row.status),
-    settings: parseOrganizationSettings(row.settings),
+    settings: settings === null ? null : organizationSettingsForResponse(settings, env),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -100,7 +104,7 @@ export const getOrganization = async (c: AppContext) => {
     throw notFound("Organization");
   }
 
-  const response = toOrganizationResponse(org);
+  const response = toOrganizationResponse(org, c.env);
 
   return success(c, response);
 };
@@ -201,7 +205,7 @@ export const updateOrganization = async (c: ValidatedBodyContext<typeof updateOr
     });
   }
 
-  return success(c, toOrganizationResponse(org));
+  return success(c, toOrganizationResponse(org, c.env));
 };
 
 export const getOrganizationProviderAccess = async (c: AppContext) => {

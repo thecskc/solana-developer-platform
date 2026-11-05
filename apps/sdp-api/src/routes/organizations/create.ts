@@ -87,7 +87,7 @@ export const createOrganization = async (
   if (!active) {
     throw internalError("Created organization is missing");
   }
-  return created(c, { organization: toOrganizationResponse(active), clerkOrganizationId });
+  return created(c, { organization: toOrganizationResponse(active, c.env), clerkOrganizationId });
 };
 
 /**

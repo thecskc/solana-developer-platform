@@ -218,19 +218,26 @@ describe("startCron", () => {
     expect(registered).toEqual(expect.arrayContaining(expected));
   });
 
-  it("registers no production work on a deployment that admits no production project", async () => {
+  it("keeps production finishers but skips production starts and observers when production is refused", async () => {
     const worker = await startWorker({ ...env, SDP_ALLOW_PRODUCTION_PROJECTS: "false" });
 
-    const environments = worker.discovered.map((registration) => registration.environment);
-    expect(environments).not.toContain("production");
-    expect(environments).toContain("sandbox");
-    expect(worker.discovered).toHaveLength(
-      CRON_DEFINITIONS.reduce(
-        (count, definition) =>
-          count + (definition.scope === "cluster" ? SDP_ENVIRONMENTS.length - 1 : 1),
-        0
-      )
-    );
+    for (const definition of CRON_DEFINITIONS) {
+      const environments = worker.discovered
+        .filter((registration) => registration.cron === definition.name)
+        .map((registration) => registration.environment);
+      if (definition.scope === "global") {
+        expect(environments).toEqual([null]);
+      } else if (definition.effect === "finishes") {
+        expect(environments).toEqual([...SDP_ENVIRONMENTS]);
+      } else {
+        expect(environments).toEqual(["sandbox"]);
+      }
+    }
+    expect(worker.discovered.flatMap((registration) => registration.ran)).toContainEqual({
+      cron: pendingTransfersCron.name,
+      environment: "production",
+      identity: { kind: "system", component: `cron:${pendingTransfersCron.name}` },
+    });
   });
 
   it("runs every slot under the system database identity named for its definition", async () => {

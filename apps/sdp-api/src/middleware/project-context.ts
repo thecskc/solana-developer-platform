@@ -3,7 +3,11 @@ import type { SdpEnvironment } from "@sdp/types/api-keys";
 import type { Context, Next } from "hono";
 import { type DatabaseExecutor, getDb } from "@/db/client";
 import { badRequest, forbidden, notFound, unauthorized } from "@/lib/errors";
-import { isProductionEntitled, productionNotEnabled } from "@/lib/production-entitlement";
+import {
+  isProductionEntitled,
+  productionNotEnabled,
+  productionProjectsAllowed,
+} from "@/lib/production-entitlement";
 import type { Env } from "@/types/env";
 
 const PROJECT_HEADER = "x-project-id";
@@ -114,7 +118,7 @@ async function resolvePathProjectScope(
     .prepare("SELECT id, environment FROM projects WHERE id = ? AND organization_id = ? LIMIT 1")
     .bind(projectId, organizationId)
     .first<{ id: string; environment: SdpEnvironment }>();
-  if (!row) {
+  if (!row || (row.environment === "production" && !productionProjectsAllowed(c.env))) {
     throw notFound("Project");
   }
   return { organizationId, projectId: row.id, environment: row.environment };

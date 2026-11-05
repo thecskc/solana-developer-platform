@@ -43,6 +43,12 @@ const organizationSettingsSchema = z
           "Read-only. An allowlist recorded before this setting was enforced, retained for reference and never applied. Send it back as `allowedIpAddresses` to put it into effect, which validates it first.",
         example: ["203.0.113.0/24"],
       }),
+    enableProductionProject: z.boolean().optional().openapi({
+      description:
+        "Read-only production entitlement honoured by this deployment. False when SDP_ALLOW_PRODUCTION_PROJECTS=false, even if the stored organization grant is true.",
+      readOnly: true,
+      example: false,
+    }),
     customRateLimits: z
       .object({
         requestsPerMinute: z.number().int().positive().optional().openapi({

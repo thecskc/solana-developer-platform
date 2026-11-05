@@ -117,6 +117,45 @@ describe("Organization access settings", () => {
     env.CLERK_SECRET_KEY = undefined;
     await clearKVStores(env);
   });
+  it("reports the deployment's production refusal without rewriting the stored grant", async () => {
+    await seedOrganization({ enableProductionProject: true, alertEmails: false });
+    const headers = { Authorization: `Bearer ${TEST_API_KEY.raw}` };
+    const response = await app.request(
+      `/v1/organizations/${ORGANIZATION_ID}`,
+      { headers },
+      { ...env, SDP_ALLOW_PRODUCTION_PROJECTS: "false" }
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: { settings: { enableProductionProject: false, alertEmails: false } },
+    });
+    expect(await readSettings()).toEqual({ enableProductionProject: true, alertEmails: false });
+    const allowed = await get(headers);
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({
+      data: { settings: { enableProductionProject: true } },
+    });
+  });
+
+  it("keeps the stored production grant when updating settings under a deployment refusal", async () => {
+    await seedOrganization({ enableProductionProject: true });
+    await signInAdmin();
+    const response = await app.request(
+      `/v1/organizations/${ORGANIZATION_ID}`,
+      {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${adminToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: { alertEmails: false } }),
+      },
+      { ...env, SDP_ALLOW_PRODUCTION_PROJECTS: "false" }
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: { settings: { enableProductionProject: false, alertEmails: false } },
+    });
+    expect(await readSettings()).toEqual({ enableProductionProject: true, alertEmails: false });
+  });
+
   describe("writing settings.allowedIpAddresses", () => {
     beforeEach(async () => {
       await seedOrganization(null);

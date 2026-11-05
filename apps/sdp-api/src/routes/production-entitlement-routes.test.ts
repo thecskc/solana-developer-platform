@@ -139,10 +139,12 @@ describe.each([
         const body = (await response.json().catch(() => null)) as {
           error?: { message?: string };
         } | null;
-        if (
-          response.status !== 403 ||
-          body?.error?.message !== "Production is not enabled for this organization"
-        ) {
+        const hiddenProject = allowProductionProjects === "false" && path.includes(":projectId");
+        const expectedStatus = hiddenProject ? 404 : 403;
+        const expectedMessage = hiddenProject
+          ? "Project not found"
+          : "Production is not enabled for this organization";
+        if (response.status !== expectedStatus || body?.error?.message !== expectedMessage) {
           reached.push(`${method} ${path} -> ${response.status} ${body?.error?.message ?? ""}`);
         }
       }
@@ -153,6 +155,37 @@ describe.each([
       const list = await app.request("/v1/projects", { headers }, env);
       const listed = (await list.json()) as { data: { projects: { environment: string }[] } };
       expect(listed.data.projects.map((project) => project.environment)).toEqual(["sandbox"]);
+    });
+
+    it("hides production project reads and valid updates without mutating the project", async () => {
+      if (allowProductionProjects !== "false") return;
+      const db = getDb(env);
+      const readProject = () =>
+        db.prepare("SELECT * FROM projects WHERE id = ?").bind(PRODUCTION_PROJECT_ID).first();
+      const readAuditCount = () =>
+        db
+          .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE organization_id = ?")
+          .bind(TEST_ORG.id)
+          .first<{ count: number }>();
+      const before = await readProject();
+      const auditBefore = await readAuditCount();
+      for (const method of ["GET", "PATCH"]) {
+        const response = await app.request(
+          `/v1/projects/${PRODUCTION_PROJECT_ID}`,
+          {
+            method,
+            headers: { ...headers, "Content-Type": "application/json" },
+            ...(method === "PATCH" ? { body: JSON.stringify({ name: "Must not change" }) } : {}),
+          },
+          env
+        );
+        expect(response.status).toBe(404);
+        expect(await response.json()).toMatchObject({
+          error: { code: "NOT_FOUND", message: "Project not found" },
+        });
+      }
+      expect(await readProject()).toEqual(before);
+      expect(await readAuditCount()).toEqual(auditBefore);
     });
 
     it("files every exemption pattern against a route that exists", () => {
