@@ -166,6 +166,22 @@ describe("organization onboarding handlers", () => {
     await seedOrganization();
   });
 
+  it("masks production entitlement on a deployment that refuses production", async () => {
+    await getDb(env)
+      .prepare("UPDATE organizations SET settings = ? WHERE id = ?")
+      .bind(JSON.stringify({ enableProductionProject: true, alertEmails: false }), ORGANIZATION_ID)
+      .run();
+    const response = await createApp().request(
+      "/status",
+      {},
+      { ...env, SDP_ALLOW_PRODUCTION_PROJECTS: "false" }
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: { organization: { settings: { enableProductionProject: false, alertEmails: false } } },
+    });
+  });
+
   it("starts a newly created organization at custody", async () => {
     expect(await getSetup()).toEqual({
       status: "not_started",

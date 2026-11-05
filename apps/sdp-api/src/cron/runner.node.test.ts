@@ -19,6 +19,7 @@ import * as moneyPathEvents from "@/runtime/money-path-events";
 import { deferred } from "@/test/helpers/deferred";
 import { env } from "@/test/helpers/env";
 import { required } from "@/test/helpers/required";
+import type { Env } from "@/types/env";
 import { earnCatalogueSyncCron } from "./earn-catalogue-sync";
 import { pendingTransfersCron } from "./pending-transfers";
 import { CRON_RUN_EVENT, type CronRegistration } from "./run-event";
@@ -109,9 +110,9 @@ function registrationKey(cron: string, environment: SdpEnvironment | null): stri
   return JSON.stringify([cron, environment]);
 }
 
-async function startWorker(): Promise<Worker> {
+async function startWorker(workerEnv: Env = env): Promise<Worker> {
   const { bg, runs } = recordingBackgroundRunner();
-  const handle = required(startCron({ env, bg }));
+  const handle = required(startCron({ env: workerEnv, bg }));
   await bg.awaitAll();
   const registrations = new Map<string, ScheduledFake>();
   const discovered: DiscoveredRegistration[] = [];
@@ -215,6 +216,28 @@ describe("startCron", () => {
     }));
     expect(registered).toHaveLength(expected.length);
     expect(registered).toEqual(expect.arrayContaining(expected));
+  });
+
+  it("keeps production finishers but skips production starts and observers when production is refused", async () => {
+    const worker = await startWorker({ ...env, SDP_ALLOW_PRODUCTION_PROJECTS: "false" });
+
+    for (const definition of CRON_DEFINITIONS) {
+      const environments = worker.discovered
+        .filter((registration) => registration.cron === definition.name)
+        .map((registration) => registration.environment);
+      if (definition.scope === "global") {
+        expect(environments).toEqual([null]);
+      } else if (definition.effect === "finishes") {
+        expect(environments).toEqual([...SDP_ENVIRONMENTS]);
+      } else {
+        expect(environments).toEqual(["sandbox"]);
+      }
+    }
+    expect(worker.discovered.flatMap((registration) => registration.ran)).toContainEqual({
+      cron: pendingTransfersCron.name,
+      environment: "production",
+      identity: { kind: "system", component: `cron:${pendingTransfersCron.name}` },
+    });
   });
 
   it("runs every slot under the system database identity named for its definition", async () => {
@@ -434,6 +457,12 @@ describe("DISABLE_CRON", () => {
     expect(() => assertCronConfig(cloudRunEnv)).not.toThrow();
     expect(startCron({ env: cloudRunEnv, bg: recordingBackgroundRunner().bg })).not.toBeNull();
     expect(scheduler.tasks).not.toEqual([]);
+  });
+
+  it("refuses an SDP_ALLOW_PRODUCTION_PROJECTS that is neither true nor false", () => {
+    expect(() => assertCronConfig({ SDP_ALLOW_PRODUCTION_PROJECTS: "no" })).toThrow(
+      'Invalid SDP_ALLOW_PRODUCTION_PROJECTS: "no"'
+    );
   });
 
   it.each(["treu", "yes", "   "])("refuses DISABLE_CRON %j before scheduling anything", (value) => {

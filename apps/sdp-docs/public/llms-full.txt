@@ -4949,12 +4949,31 @@ For provider-managed co-signer runtimes that live outside the default stack, see
 | `SDP_API_PORT` | `8787` | Host port for the API. |
 | `SDP_WEB_PORT` | `3000` | Host port for the dashboard. |
 | `SDP_DOCS_PORT` | `3001` | Host port for these docs. |
+| `SDP_ALLOW_PRODUCTION_PROJECTS` | `true` (unset) | `false` overrides organization production grants, hides production projects and refuses new production movements. Only `true` or `false` are valid; other values fail startup. Set the same value on API and worker services. |
+| `CORS_EXTRA_ORIGIN` | Unset | One additional exact HTTPS browser origin, such as `https://docs.example.com`. No path, trailing slash, credentials, wildcard or list. Invalid values fail startup. This does not change Clerk's `FRONTEND_URL` session-origin check. |
 | `TRUST_PROXY_HEADERS` | `false` | How to read `X-Forwarded-For`. `true` trusts the first address — enable only behind an ingress that replaces caller-supplied forwarding headers. `gclb` is for ingress restricted to a Google Cloud external Application Load Balancer, which appends the verified client address instead. Direct deployments leave this `false` and share the fail-closed unidentified quota bucket. |
 
 `SDP_API_BASE_URL` defaults to the in-network service name `http://sdp-api:8787`
 for server-to-server calls. The browser-facing `NEXT_PUBLIC_*` URLs default to
 `localhost` (for example `http://localhost:8787` and `http://localhost:3000`) and
 need changing when you put the services behind your own domains or ingress.
+
+## Deployments that refuse production
+
+With `SDP_ALLOW_PRODUCTION_PROJECTS=false`, project lists hide production, and
+path-addressed production projects return 404. Organization and onboarding
+responses mask the production grant. New organizations receive only a Sandbox
+project. Apply the flag to both API and worker services; an unset service still
+allows production subject to the organization's grant.
+
+Existing exits remain available. Production cron finishers still settle signed
+or funded movements, including global ramp webhook replay and status sweeping.
+Cluster-scoped production starts and observers are not registered. Keep the RPC, signing and
+provider credentials needed for outstanding production movements and exits
+when changing an existing deployment.
+
+The flag controls admission; it does not isolate data or credentials. Give a
+fresh devnet deployment its own database and sandbox provider credentials.
 
 ---
 
@@ -5623,6 +5642,10 @@ Public: this route takes no API key.
 
     Git commit the serving image was built from, or `local` when the image carries none.
 
+  - **`releaseChannel`** · `string` · required · one of `experimental`, `beta`, `stable` · example `stable`
+
+    Release channel: which modules this deployment runs.
+
   - **`checks`** · `object` · required
 
     Dependency health checks.
@@ -5669,6 +5692,7 @@ r = requests.get("https://api.solana.com/health/ready")
   "timestamp": "2025-01-01T00:00:00.000Z",
   "revision": "sdp-prod-api-public-00042-abc",
   "commit": "0123456789abcdef0123456789abcdef01234567",
+  "releaseChannel": "stable",
   "checks": {
     "database": "ok",
     "redis": "ok",
@@ -5683,6 +5707,7 @@ r = requests.get("https://api.solana.com/health/ready")
   "timestamp": "2025-01-01T00:00:00.000Z",
   "revision": "sdp-prod-api-public-00042-abc",
   "commit": "0123456789abcdef0123456789abcdef01234567",
+  "releaseChannel": "stable",
   "checks": {
     "database": "ok",
     "redis": "error",
@@ -7919,6 +7944,8 @@ Source: https://platform.solana.com/docs/reference/api/projects/list-projects
 
 `GET /v1/projects`
 
+Production projects are hidden when production is not enabled for the organization or this deployment.
+
 Requires an [API key](/docs/developing-with-sdp/authentication) with the `projects.read` action.
 
 ## Query parameters
@@ -8120,6 +8147,8 @@ Source: https://platform.solana.com/docs/reference/api/projects/get-project
 > Gets project details.
 
 `GET /v1/projects/{projectId}`
+
+A production project returns 404 when this deployment refuses production projects.
 
 Requires an [API key](/docs/developing-with-sdp/authentication) with the `projects.read` action.
 
@@ -8324,6 +8353,8 @@ Source: https://platform.solana.com/docs/reference/api/projects/update-project
 > Updates project attributes.
 
 `PATCH /v1/projects/{projectId}`
+
+A production project returns 404 without changing it when this deployment refuses production projects.
 
 Requires an [API key](/docs/developing-with-sdp/authentication) with the `projects.manage` action.
 
@@ -8580,7 +8611,7 @@ Source: https://platform.solana.com/docs/reference/api/projects/get-project-prov
 
 `GET /v1/projects/{projectId}/provider-availability`
 
-The same rule gates every provider entry point, so a provider reported unavailable is refused there with 403, or 503 when the deployment does not hold its credentials. A project outside the caller's organization, or another project for a project-bound API key, returns 404.
+The same rule gates every provider entry point, so a provider reported unavailable is refused there with 403, or 503 when the deployment does not hold its credentials. A project outside the caller's organization, another project for a project-bound API key, or a production project on a deployment that refuses production returns 404.
 
 Requires an [API key](/docs/developing-with-sdp/authentication) with the `projects.read` action.
 

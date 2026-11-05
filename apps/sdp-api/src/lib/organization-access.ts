@@ -17,6 +17,7 @@ import type { WalletAccess } from "@/lib/auth";
 import { getClientIp } from "@/lib/client-ip";
 import { AppError } from "@/lib/errors";
 import { isClientIpAllowed } from "@/lib/ip-allowlist";
+import { productionProjectsAllowed } from "@/lib/production-entitlement";
 import { parseGrantsColumn } from "@/services/api-key.service";
 import type { Env } from "@/types/env";
 
@@ -275,5 +276,18 @@ export function projectOrganizationSettings(settings: OrganizationSettings): Org
     enableProductionProject: settings.enableProductionProject,
     customRateLimits: settings.customRateLimits,
     alertEmails: settings.alertEmails,
+  };
+}
+
+/** Settings exposed to callers, with this deployment's production policy applied only on reads. */
+export function organizationSettingsForResponse(
+  settings: OrganizationSettings,
+  env: Pick<Env, "SDP_ALLOW_PRODUCTION_PROJECTS">
+): OrganizationSettings {
+  return {
+    ...projectOrganizationSettings(settings),
+    enableProductionProject: productionProjectsAllowed(env)
+      ? settings.enableProductionProject
+      : false,
   };
 }

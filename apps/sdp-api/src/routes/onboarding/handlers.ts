@@ -4,7 +4,7 @@ import type { Context } from "hono";
 import { getDb } from "@/db/client";
 import { parseOptionalPostgresJson } from "@/db/postgres-utils";
 import { notFound } from "@/lib/errors";
-import { projectOrganizationSettings } from "@/lib/organization-access";
+import { organizationSettingsForResponse } from "@/lib/organization-access";
 import { success } from "@/lib/response";
 import { getAuthorized } from "@/middleware/authorize";
 import type { Env } from "@/types/env";
@@ -13,7 +13,7 @@ import { ONBOARDING_VERSION, resolveOnboardingSetup } from "./state";
 
 type AppContext = Context<{ Bindings: Env }>;
 
-async function fetchOrganization(db: DatabaseClient, orgId: string) {
+async function fetchOrganization(db: DatabaseClient, orgId: string, env: Env) {
   const org = await db
     .prepare(
       `SELECT id, name, slug, tier, status, settings, onboarding_completed_at,
@@ -45,7 +45,7 @@ async function fetchOrganization(db: DatabaseClient, orgId: string) {
     slug: org.slug,
     tier: normalizeOrganizationTier(org.tier),
     status: org.status as "active" | "suspended" | "deleted",
-    settings: storedSettings === null ? null : projectOrganizationSettings(storedSettings),
+    settings: storedSettings === null ? null : organizationSettingsForResponse(storedSettings, env),
     createdAt: org.created_at,
     updatedAt: org.updated_at,
     onboardingCompletedAt: org.onboarding_completed_at,
@@ -117,7 +117,7 @@ export const getOnboardingStatus = async (c: AppContext) => {
   }
 
   const db = getDb(c.env);
-  const organization = await fetchOrganization(db, session.organizationId);
+  const organization = await fetchOrganization(db, session.organizationId, c.env);
   const setup = await buildOnboardingSetup({
     canManage: memberRole === "admin",
     db,

@@ -31,7 +31,8 @@ export function registerProjectPaths(registry: OpenAPIRegistry, publishEarn: boo
     tags: ["Projects"],
     summary: "List projects",
     operationId: "listProjects",
-    description: "Lists projects in the organization.",
+    description:
+      "Lists projects in the organization. Production projects are hidden when production is not enabled for the organization or this deployment.",
     security: [{ apiKeyAuth: [] }],
     request: {
       query: z.object({
@@ -53,7 +54,8 @@ export function registerProjectPaths(registry: OpenAPIRegistry, publishEarn: boo
     tags: ["Projects"],
     summary: "Get project",
     operationId: "getProject",
-    description: "Gets project details.",
+    description:
+      "Gets project details. A production project returns 404 when this deployment refuses production projects.",
     security: [{ apiKeyAuth: [] }],
     request: {
       params: z.object({
@@ -75,7 +77,8 @@ export function registerProjectPaths(registry: OpenAPIRegistry, publishEarn: boo
     tags: ["Projects"],
     summary: "Update project",
     operationId: "updateProject",
-    description: "Updates project attributes.",
+    description:
+      "Updates project attributes. A production project returns 404 without changing it when this deployment refuses production projects.",
     security: [{ apiKeyAuth: [] }],
     request: {
       params: z.object({
@@ -102,7 +105,7 @@ export function registerProjectPaths(registry: OpenAPIRegistry, publishEarn: boo
     summary: "Get project provider availability",
     operationId: "getProjectProviderAvailability",
     description:
-      "Lists every provider this deployment's release channel publishes, with whether this project can use it, counting the deployment's provider credentials for the project's environment. The same rule gates every provider entry point, so a provider reported unavailable is refused there with 403, or 503 when the deployment does not hold its credentials. A project outside the caller's organization, or another project for a project-bound API key, returns 404.",
+      "Lists every provider this deployment's release channel publishes, with whether this project can use it, counting the deployment's provider credentials for the project's environment. The same rule gates every provider entry point, so a provider reported unavailable is refused there with 403, or 503 when the deployment does not hold its credentials. A project outside the caller's organization, another project for a project-bound API key, or a production project on a deployment that refuses production returns 404.",
     security: [{ apiKeyAuth: [] }],
     request: {
       params: z.object({

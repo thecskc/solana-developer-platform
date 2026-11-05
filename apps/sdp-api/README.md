@@ -182,6 +182,30 @@ beats Doppler. Check with `curl -s localhost:8787/health`, which reports
 - Modules outside the channel answer 403 "The <module> module is not available
   in this release channel." and are hidden in the dashboard.
 
+### Deployment production policy and CORS
+
+`SDP_ALLOW_PRODUCTION_PROJECTS` accepts `true` or `false`; unset means `true`.
+Other values fail startup. Set it to `false` on a devnet deployment sharing a
+Clerk instance to override organization production grants. Set the same value
+on the API and worker services. It hides production projects from lists,
+returns 404 for path-addressed production projects, masks the production grant
+in organization and onboarding responses, and refuses new production money
+movements. New organizations receive only a Sandbox project.
+
+This is an admission policy, not database or credential isolation. Existing
+exits remain available. Production cron finishers keep settling signed or
+funded movements; cluster-scoped production starts and observers are not registered. Global
+ramp replay and status jobs also keep finishing existing movements. A fresh
+devnet deployment should use its own database and sandbox provider credentials.
+When changing an existing deployment, retain the production RPC, signing and
+provider credentials needed to finish its outstanding movements and exits.
+
+`CORS_EXTRA_ORIGIN` adds one exact HTTPS browser origin to the existing CORS
+allowlist, for example `https://docs.example.com`. Leave it unset for no extra
+origin. Paths, trailing slashes, credentials, wildcards and multiple origins
+are invalid and fail startup. This setting does not change the Clerk session
+origin configured through `FRONTEND_URL`.
+
 ### Optional: Custody Integrations
 
 To test with specific custody providers, add their credentials:
