@@ -91,6 +91,18 @@ exposes the response header so they can read the generated ID.
 
 ## Provider payload bodies
 
+Credential redaction validates whole JSON strings and replaces sensitive source spans.
+Every duplicate member is inspected, including members shadowed by a later value, and
+non-secret number text and formatting survive unchanged. Nested serialized strings and
+percent-encoded credentials are inspected up to four encoding levels; JSON containers
+beyond depth 16 are masked whole.
+
+Strings longer than 65,536 UTF-16 code units (`string.length`) become `[REDACTED]` in
+full before parsing, decoding, or text scanning. This bounds synchronous work on large
+provider diagnostics at client, logging, Sentry, and audit boundaries. A prefix is not
+retained because it could contain a partial credential. Structured sibling fields such as
+provider status, error code, and resource ids remain available for diagnosis.
+
 A provider's response body is unbounded and provider-shaped, so nothing inside it can be
 vouched for by key. Two layers keep raw bodies out of telemetry:
 

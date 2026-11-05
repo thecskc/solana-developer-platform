@@ -12,10 +12,11 @@
  * as strings — serialized JSON, sometimes serialized again, sometimes
  * percent-encoded into a URL — and a pattern over the flat text only sees the
  * shapes someone thought to write down. So a string that is a JSON document
- * is parsed and redacted by key with the same `isCredentialKey` policy the
- * object walker uses, and a string that carries percent-escapes is decoded and
- * redacted again. Both steps are bounded (`MAX_NESTING`, `MAX_JSON_LENGTH`),
- * since this runs on every log line. Text that does not parse goes through the
+ * is validated and its source tokens redacted by key with the same
+ * `isCredentialKey` policy the object walker uses. A string that carries
+ * percent-escapes is decoded and redacted again. Both steps are bounded
+ * (`MAX_NESTING`, `MAX_STRING_LENGTH`), since this runs on every log line.
+ * Oversized strings are masked whole. Text that does not parse goes through the
  * scanners below, which also take their key decisions from `isCredentialKey`,
  * and which mask to the end of the text when a value never closes.
  */
@@ -28,16 +29,15 @@ import { isCredentialKey, isFreeTextCredentialKey, normalizeKey, REDACTED } from
  * it, the scanners alone decide.
  */
 const MAX_NESTING = 4;
-/** Longer strings are not parsed as JSON; the scanners still run on them. */
-const MAX_JSON_LENGTH = 64 * 1024;
+/** Mask larger diagnostics whole, bounding all parsing, decoding and scanning. */
+const MAX_STRING_LENGTH = 64 * 1024;
 /** Object depth inside one parsed document; deeper values are masked whole. */
 const MAX_JSON_DEPTH = 16;
 
 const JSON_DOCUMENT_START = /^\s*["[{]/;
-// A number `JSON.parse` may round (16+ digits, or an exponent), so
-// reserializing a document that has one could rewrite an amount or a numeric
-// id. A match inside a string only costs a second check.
-const LOSSY_NUMBER = /\d{16}|\d[eE][+-]?\d/;
+// After validation, only strings and container boundaries need inspection.
+// A key token includes its colon; numeric tokens are never rebuilt.
+const JSON_TOKEN = /"(?:[^"\\]|\\.)*"(\s*:\s*)?|[{}[\]]/g;
 const PERCENT_ESCAPE = /%[0-9A-Fa-f]{2}/;
 const PERCENT_ESCAPE_RUN = /(?:%[0-9A-Fa-f]{2})+/g;
 const ASCII_PERCENT_ESCAPE = /%([0-7][0-9A-Fa-f])/g;
@@ -127,6 +127,11 @@ export function redactCredentialString(value: string): string {
 }
 
 function redactString(value: string, nesting: number): string {
+  // Do not scan a prefix: a credential may straddle the cutoff or continue
+  // beyond it. Masking the whole value is both bounded and fail-closed.
+  if (value.length > MAX_STRING_LENGTH) {
+    return REDACTED;
+  }
   if (nesting < MAX_NESTING) {
     const document = redactJsonDocument(value, nesting);
     if (document !== undefined) {
@@ -152,81 +157,62 @@ function redactString(value: string, nesting: number): string {
 }
 
 /**
- * Redacts a string that is a whole JSON document by key, or returns undefined
- * when it is not one. The original text comes back when nothing was redacted,
- * so formatting survives.
+ * Validate the document, then replace only sensitive source spans. Walking the
+ * parsed object would discard duplicate members; serializing it would round
+ * numeric diagnostics. Source tokens retain every member and exact number.
  */
 function redactJsonDocument(value: string, nesting: number): string | undefined {
-  if (value.length > MAX_JSON_LENGTH || !JSON_DOCUMENT_START.test(value)) {
+  if (!JSON_DOCUMENT_START.test(value)) {
     return undefined;
   }
-  const parsed = parseJson(value);
-  if (parsed === undefined) {
-    return undefined;
-  }
-  const redacted = redactJsonValue(parsed, nesting, 0);
-  if (redacted === parsed) {
-    return value;
-  }
-  if (LOSSY_NUMBER.test(value)) {
-    // The scanners keep number text as written. Use their output when parsing
-    // it finds nothing more to redact (an escaped key such as `\u006dnemonic`
-    // is one they miss); otherwise the secret wins over the number's digits.
-    const scanned = redactText(value);
-    const rescanned = parseJson(scanned);
-    if (rescanned !== undefined && redactJsonValue(rescanned, nesting, 0) === rescanned) {
-      return scanned;
-    }
-  }
-  return JSON.stringify(redacted);
-}
-
-function parseJson(value: string): JsonValue | undefined {
   try {
-    // SAFETY: JSON.parse only ever produces JSON values.
-    return JSON.parse(value);
+    JSON.parse(value);
   } catch {
+    // Malformed provider text is handled by the conservative text scanners.
     return undefined;
   }
-}
 
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-
-/**
- * Returns `value` itself when nothing inside it changed. A property name is
- * text too (`{"token=...":1}`), so it is redacted like any other string.
- */
-function redactJsonValue(value: JsonValue, nesting: number, depth: number): JsonValue {
-  if (typeof value === "string") {
-    return redactString(value, nesting + 1);
+  const tokens = new RegExp(JSON_TOKEN);
+  let depth = 0;
+  let redacted = "";
+  let copiedUpTo = 0;
+  for (let match = tokens.exec(value); match !== null; match = tokens.exec(value)) {
+    const [token, separator] = match;
+    let end = tokens.lastIndex;
+    let replacement: string;
+    if (token === "{" || token === "[") {
+      if (depth < MAX_JSON_DEPTH) {
+        depth += 1;
+        continue;
+      }
+      end = fieldValueEnd(value, match.index).end;
+      replacement = JSON.stringify(REDACTED);
+    } else if (token === "}" || token === "]") {
+      depth -= 1;
+      continue;
+    } else {
+      const quoted = separator === undefined ? token : token.slice(0, -separator.length);
+      // SAFETY: validation above and JSON_TOKEN guarantee a JSON string token.
+      const decoded: string = JSON.parse(quoted);
+      const next = redactString(decoded, nesting + 1);
+      const credential = separator !== undefined && isCredentialKey(decoded);
+      if (next === decoded && !credential) {
+        continue;
+      }
+      replacement = JSON.stringify(next);
+      if (separator !== undefined) {
+        replacement += separator;
+      }
+      if (credential) {
+        end = fieldValueEnd(value, tokens.lastIndex).end;
+        replacement += JSON.stringify(REDACTED);
+      }
+    }
+    redacted += value.slice(copiedUpTo, match.index) + replacement;
+    copiedUpTo = end;
+    tokens.lastIndex = end;
   }
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-  if (depth >= MAX_JSON_DEPTH) {
-    return REDACTED;
-  }
-
-  if (Array.isArray(value)) {
-    let changed = false;
-    const items = value.map((item) => {
-      const next = redactJsonValue(item, nesting, depth + 1);
-      changed ||= next !== item;
-      return next;
-    });
-    return changed ? items : value;
-  }
-
-  let changed = false;
-  const entries = Object.entries(value).map(([key, item]): [string, JsonValue] => {
-    const nextKey = redactString(key, nesting + 1);
-    const next = isCredentialKey(key) ? REDACTED : redactJsonValue(item, nesting, depth + 1);
-    changed ||= nextKey !== key || next !== item;
-    return [nextKey, next];
-  });
-  // `Object.fromEntries` defines own properties, so a `__proto__` field
-  // survives instead of hitting the inherited setter.
-  return changed ? Object.fromEntries(entries) : value;
+  return redacted + value.slice(copiedUpTo);
 }
 
 /**
