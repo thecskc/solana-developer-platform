@@ -2095,39 +2095,77 @@ describe("provider credential lifecycle", () => {
     ).toEqual([{ provider_credential_id: CREDENTIAL_ID }]);
   });
 
-  it("keeps the current credential and writes no candidate when Privy rejects the rotation", async () => {
-    const providerFetch = vi
-      .fn()
-      .mockResolvedValue(
-        Response.json({ code: "missing_or_invalid_privy_app_id" }, { status: 400 })
-      );
-    vi.stubGlobal("fetch", providerFetch);
-    const db = getDb(env);
-    const before = await db.queryMany("SELECT * FROM provider_credentials ORDER BY id");
+  it.each([
+    [
+      "rejects",
+      () => Response.json({ code: "missing_or_invalid_privy_app_id" }, { status: 400 }),
+      "The provider rejected these credentials. Check the credential fields, then connect again.",
+      "invalid_credentials",
+    ],
+    [
+      "returns malformed wallets for",
+      () => Response.json({ data: [{}] }),
+      "Privy did not confirm these credentials, so nothing was saved. Try again.",
+      "provider_unconfirmed",
+    ],
+  ])(
+    "audits the attempt and writes no candidate when Privy %s the rotation",
+    async (_case, outcome, message, reason) => {
+      let preflightAudits: Awaited<ReturnType<typeof lifecycleAuditAttempts>> = [];
+      const providerFetch = vi.fn().mockImplementation(async () => {
+        preflightAudits = await lifecycleAuditAttempts("submit");
+        return outcome();
+      });
+      vi.stubGlobal("fetch", providerFetch);
+      const db = getDb(env);
+      const before = await db.queryMany("SELECT * FROM provider_credentials ORDER BY id");
 
-    const response = await lifecycleRequest(`/provider-credentials/${CREDENTIAL_ID}/rotate`, {
-      method: "POST",
-      key: "rotate-preflight-rejected",
-      body: { provider: "privy", fields: { appId: APP_ID, appSecret: "rejected-secret" } },
-    });
+      const response = await lifecycleRequest(`/provider-credentials/${CREDENTIAL_ID}/rotate`, {
+        method: "POST",
+        key: "rotate-preflight-rejected",
+        body: { provider: "privy", fields: { appId: APP_ID, appSecret: "rejected-secret" } },
+      });
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
-      error: {
-        code: "BAD_REQUEST",
-        message:
-          "The provider rejected these credentials. Check the credential fields, then connect again.",
-        details: { reason: "invalid_credentials" },
-      },
-      meta: { requestId: "req_provider_credential_lifecycle" },
-    });
-    expect(providerFetch).toHaveBeenCalledOnce();
-    expect(await db.queryMany("SELECT * FROM provider_credentials ORDER BY id")).toEqual(before);
-    expect(await lifecycleAuditAttempts("submit")).toEqual([]);
-    expect(await activeConnectionCredentialIds()).toEqual([
-      { provider_credential_id: CREDENTIAL_ID },
-    ]);
-  });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "BAD_REQUEST",
+          message,
+          details: { reason },
+        },
+        meta: { requestId: "req_provider_credential_lifecycle" },
+      });
+      expect(providerFetch).toHaveBeenCalledOnce();
+      expect(preflightAudits).toEqual([
+        {
+          intent_id: expect.any(String),
+          credential_id: expect.any(String),
+          user_id: USER_ID,
+          request_id: "req_provider_credential_lifecycle",
+          intent_event: "provider_credential_rotation_submission_started",
+          outcome_event: null,
+          outcome_status: null,
+          failure_code: null,
+        },
+      ]);
+      expect(await db.queryMany("SELECT * FROM provider_credentials ORDER BY id")).toEqual(before);
+      expect(await lifecycleAuditAttempts("submit")).toEqual([
+        {
+          intent_id: expect.any(String),
+          credential_id: expect.any(String),
+          user_id: USER_ID,
+          request_id: "req_provider_credential_lifecycle",
+          intent_event: "provider_credential_rotation_submission_started",
+          outcome_event: "provider_credential_rotation_submission_failed",
+          outcome_status: "failure",
+          failure_code: null,
+        },
+      ]);
+      expect(await activeConnectionCredentialIds()).toEqual([
+        { provider_credential_id: CREDENTIAL_ID },
+      ]);
+    }
+  );
 
   it("audits a rejected rotation once across replays", async () => {
     const providerFetch = vi
@@ -2452,7 +2490,7 @@ describe("provider credential lifecycle", () => {
     );
   });
 
-  it("refuses candidate submission before storage or the candidate check when audit intent is unavailable", async () => {
+  it("refuses candidate submission before storage or Privy preflight when audit intent is unavailable", async () => {
     const providerFetch = vi.fn().mockImplementation(async () => Response.json({ data: [] }));
     vi.stubGlobal("fetch", providerFetch);
     const db = getDb(env);
@@ -2474,7 +2512,7 @@ describe("provider credential lifecycle", () => {
            FROM provider_credentials WHERE idempotency_key = 'rotate-audit-unavailable'`
         )
       ).toBeNull();
-      expect(providerFetch).toHaveBeenCalledOnce();
+      expect(providerFetch).not.toHaveBeenCalled();
       expect(await rotationFailureEvents()).toEqual([]);
     } finally {
       await db.execute("ALTER TABLE audit_logs DROP CONSTRAINT sdp_test_fail_rotation_audit");
@@ -2669,6 +2707,53 @@ describe("provider credential lifecycle", () => {
         status: "failure",
         failure_code: "credential_storage_unavailable",
       },
+    ]);
+  });
+
+  it("keeps the active credential when rotation completion returns malformed wallets", async () => {
+    const providerFetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ data: [] }))
+      .mockImplementation(async () => Response.json({ data: [{}] }));
+    vi.stubGlobal("fetch", providerFetch);
+
+    const created = await lifecycleRequest(`/provider-credentials/${CREDENTIAL_ID}/rotate`, {
+      method: "POST",
+      key: "rotate-malformed-completion",
+      body: { provider: "privy", fields: { appId: APP_ID, appSecret: "new-secret" } },
+    });
+    expect(created.status).toBe(200);
+    const body = await created.json();
+    const { data } = credentialResponseSchema.parse(body);
+    expect(body).toMatchObject({
+      data: {
+        providerCredential: { status: "pending" },
+        rotation: { status: "retry_unknown", code: "provider_response_unknown" },
+      },
+    });
+
+    const completed = await lifecycleRequest(
+      `/provider-credentials/${data.providerCredential.id}/complete-rotation`,
+      { method: "POST" }
+    );
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({
+      data: {
+        providerCredential: { id: data.providerCredential.id, status: "pending" },
+        rotation: { status: "retry_unknown", code: "provider_response_unknown" },
+      },
+    });
+    expect(providerFetch).toHaveBeenCalledTimes(3);
+    expect(
+      await getDb(env).queryMany(
+        "SELECT id, status FROM provider_credentials ORDER BY credential_version, id"
+      )
+    ).toEqual([
+      { id: CREDENTIAL_ID, status: "active" },
+      { id: data.providerCredential.id, status: "pending" },
+    ]);
+    expect(await activeConnectionCredentialIds()).toEqual([
+      { provider_credential_id: CREDENTIAL_ID },
     ]);
   });
 

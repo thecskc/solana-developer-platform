@@ -425,6 +425,12 @@ describe("POST /internal/dashboard/custody/provider-credentials", () => {
       "Privy did not confirm these credentials, so nothing was saved. Try again.",
       "provider_unconfirmed",
     ],
+    [
+      "returns malformed wallets for",
+      () => Promise.resolve(Response.json({ data: [{}] })),
+      "Privy did not confirm these credentials, so nothing was saved. Try again.",
+      "provider_unconfirmed",
+    ],
   ])(
     "stores nothing when Privy %s the submitted credentials",
     async (_case, privyOutcome, message, reason) => {
@@ -454,51 +460,64 @@ describe("POST /internal/dashboard/custody/provider-credentials", () => {
     }
   );
 
-  it("keeps the failed Connection's credential when Privy rejects its replacement", async () => {
-    const { app, token } = buildApp();
-    const first = await submit(app, token, {
-      projectId: PROJECT_ID,
-      key: "replacement-preflight-v1",
-      body: VALID_BODY,
-    });
-    const { data } = z
-      .object({
-        data: z.object({
-          providerCredential: z.object({ id: z.string() }),
-          connectionId: z.string(),
-        }),
-      })
-      .parse(await first.json());
-    await markInitialValidationFailed(getDb(env), {
-      credentialId: data.providerCredential.id,
-      connectionId: data.connectionId,
-    });
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      Response.json({ code: "missing_or_invalid_privy_app_id" }, { status: 400 })
-    );
+  it.each([
+    [
+      "rejects",
+      () => Response.json({ code: "missing_or_invalid_privy_app_id" }, { status: 400 }),
+      "The provider rejected these credentials. Check the credential fields, then connect again.",
+      "invalid_credentials",
+    ],
+    [
+      "returns malformed wallets for",
+      () => Response.json({ data: [null] }),
+      "Privy did not confirm these credentials, so nothing was saved. Try again.",
+      "provider_unconfirmed",
+    ],
+  ])(
+    "keeps the failed Connection's credential when Privy %s its replacement",
+    async (_case, outcome, message, reason) => {
+      const { app, token } = buildApp();
+      const first = await submit(app, token, {
+        projectId: PROJECT_ID,
+        key: "replacement-preflight-v1",
+        body: VALID_BODY,
+      });
+      const { data } = z
+        .object({
+          data: z.object({
+            providerCredential: z.object({ id: z.string() }),
+            connectionId: z.string(),
+          }),
+        })
+        .parse(await first.json());
+      await markInitialValidationFailed(getDb(env), {
+        credentialId: data.providerCredential.id,
+        connectionId: data.connectionId,
+      });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(outcome());
 
-    const response = await replace(app, token, data.connectionId, {
-      projectId: PROJECT_ID,
-      key: "replacement-preflight-v2",
-      body: VALID_BODY,
-    });
+      const response = await replace(app, token, data.connectionId, {
+        projectId: PROJECT_ID,
+        key: "replacement-preflight-v2",
+        body: VALID_BODY,
+      });
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({
-      error: {
-        code: "BAD_REQUEST",
-        message:
-          "The provider rejected these credentials. Check the credential fields, then connect again.",
-        details: { reason: "invalid_credentials" },
-      },
-      meta: { requestId: "req_provider_credential_submit" },
-    });
-    expect(await getDomainCounts()).toEqual({ credentials: 1, connections: 1, wallets: 0 });
-    expect(await getConnectionForCredential(data.providerCredential.id)).toMatchObject({
-      id: data.connectionId,
-      status: "failed",
-    });
-  });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({
+        error: {
+          code: "BAD_REQUEST",
+          message,
+          details: { reason },
+        },
+        meta: { requestId: "req_provider_credential_submit" },
+      });
+      expect(await getDomainCounts()).toEqual({ credentials: 1, connections: 1, wallets: 0 });
+      expect(await getConnectionForCredential(data.providerCredential.id)).toMatchObject({
+        id: data.connectionId,
+        status: "failed",
+      });
+    }
+  );
 
   it("refuses a user's sixth Privy credential check in a window without contacting Privy", async () => {
     const providerFetch = vi

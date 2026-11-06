@@ -45,6 +45,44 @@ describe("checkPrivyCredential", () => {
     );
   });
 
+  it("accepts populated wallet lists with provider metadata", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          data: [
+            { id: "wallet-123", address: "solana-address", chain_type: "solana", policy_ids: [] },
+            { id: "wallet-456", address: "0x1234", chain_type: "ethereum" },
+          ],
+          next_cursor: null,
+        },
+        200
+      )
+    );
+
+    await expect(checkPrivyCredential({}, { appId: "app-123", appSecret: "secret" })).resolves.toBe(
+      "success"
+    );
+  });
+
+  it.each([
+    ["empty wallet", [{}]],
+    ["null wallet", [null]],
+    ["primitive wallet", ["wallet-123"]],
+    ["missing address", [{ id: "wallet-123", chain_type: "solana" }]],
+    ["blank id", [{ id: " ", address: "solana-address", chain_type: "solana" }]],
+    ["invalid chain type", [{ id: "wallet-123", address: "solana-address", chain_type: 1 }]],
+    [
+      "mixed valid and invalid wallets",
+      [{ id: "wallet-123", address: "solana-address", chain_type: "solana" }, {}],
+    ],
+  ])("does not confirm credentials for a %s", async (_case, data) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ data }, 200));
+
+    await expect(checkPrivyCredential({}, { appId: "app-123", appSecret: "secret" })).resolves.toBe(
+      "retry_unknown"
+    );
+  });
+
   it.each([
     ["rate limit", () => jsonResponse({ error: "rate limited" }, 429)],
     ["provider failure", () => jsonResponse({ error: "unavailable" }, 503)],

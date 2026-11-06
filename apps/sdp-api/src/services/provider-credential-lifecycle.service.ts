@@ -188,9 +188,6 @@ export async function rotateProviderCredential(
     throw conflict(ROTATION_UNAVAILABLE);
   }
 
-  if ("appId" in fields) {
-    await assertPrivyCredentialAccepted(c.env, fields);
-  }
   await resolveRegistrationPayload(c, target.credential.provider, fields, idempotencyKey);
   const result = await submitRotationCandidate(
     context,
@@ -229,6 +226,9 @@ async function submitRotationCandidate(
   let stored: StoredCredentialSecret;
   let existingSecretRef: string | null = null;
   try {
+    if ("appId" in fields) {
+      await assertPrivyCredentialAccepted(c.env, fields);
+    }
     secretStore = createStoredSecretStore(c, candidateId);
     if (secretStore.storageBackend === "gcp_secret_manager") {
       existingSecretRef = await context.store.findGcpContainerRef(

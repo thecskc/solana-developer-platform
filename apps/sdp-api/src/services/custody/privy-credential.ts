@@ -6,6 +6,15 @@ import type { Env } from "@/types/env";
 const PRIVY_CHECK_TIMEOUT_MS = 10_000;
 const PRIVY_INVALID_CREDENTIALS_CODE = "missing_or_invalid_privy_app_id";
 const privyErrorBodySchema = z.object({ code: z.string() });
+const privyWalletListSchema = z.object({
+  data: z.array(
+    z.object({
+      id: z.string().trim().min(1),
+      address: z.string().trim().min(1),
+      chain_type: z.string().trim().min(1),
+    })
+  ),
+});
 const PRIVY_CREDENTIALS_REJECTED_MESSAGE =
   "The provider rejected these credentials. Check the credential fields, then connect again.";
 const PRIVY_CREDENTIALS_UNCONFIRMED_MESSAGE =
@@ -46,8 +55,8 @@ export async function checkPrivyCredential(
         : "retry_unknown";
     }
     if (response.status !== 200) return "retry_unknown";
-    const body = await response.json().catch(() => null);
-    return isWalletListResponse(body) ? "success" : "retry_unknown";
+    const body = await response.json();
+    return privyWalletListSchema.safeParse(body).success ? "success" : "retry_unknown";
   } catch {
     return "retry_unknown";
   }
@@ -64,13 +73,4 @@ export async function assertPrivyCredentialAccepted(
   if (result === "retry_unknown") {
     throw badRequest(PRIVY_CREDENTIALS_UNCONFIRMED_MESSAGE, { reason: "provider_unconfirmed" });
   }
-}
-
-function isWalletListResponse(value: unknown): value is { data: unknown[] } {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "data" in value &&
-    Array.isArray((value as { data?: unknown }).data)
-  );
 }
