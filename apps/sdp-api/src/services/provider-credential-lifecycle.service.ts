@@ -38,6 +38,7 @@ import {
   resolveRegistrationPayload,
   retireFireblocksCsr,
 } from "@/services/custody/fireblocks-registration.service";
+import { assertPrivyCredentialAccepted } from "@/services/custody/privy-credential";
 import { assertCustodyProviderAvailable } from "@/services/provider-availability.service";
 import {
   assertCredentialCreationSettled,
@@ -225,6 +226,9 @@ async function submitRotationCandidate(
   let stored: StoredCredentialSecret;
   let existingSecretRef: string | null = null;
   try {
+    if ("appId" in fields) {
+      await assertPrivyCredentialAccepted(c.env, fields);
+    }
     secretStore = createStoredSecretStore(c, candidateId);
     if (secretStore.storageBackend === "gcp_secret_manager") {
       existingSecretRef = await context.store.findGcpContainerRef(

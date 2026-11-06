@@ -116,6 +116,9 @@ from the [Privy dashboard](https://dashboard.privy.io), and a **Wallet label**.
 Click **Connect and create wallet** to verify the connection and create your
 first Privy wallet.
 
+If Privy cannot confirm your credentials, SDP does not save them. Check the
+fields or retry when Privy is available; see [provider setup](/docs/guides/setup-wallets).
+
 [![Privy credential form with an example app ID and a masked app secret](/images/go-to-mainnet/04-connect-privy.png)](/docs/images/go-to-mainnet/04-connect-privy.png)
 
 For more wallets, pick this connection under **Whose Privy account holds the
@@ -34998,6 +35001,11 @@ With your own account, enter a **Credential label**, your **Privy app ID** and
 your **Privy app secret**, then a **Wallet label** under **Wallet details**.
 Click **Connect and create wallet** to connect the account and create its first
 wallet.
+
+Privy must confirm your credentials before SDP saves them, including replacements
+and rotation candidates. An empty wallet list is valid. If Privy rejects the
+credentials, is unavailable, or returns malformed wallet data, SDP asks you to
+retry without saving them or changing the connection's current credentials.
 
 ![Privy provider setup with example credentials and a masked secret](/images/go-to-mainnet/04-connect-privy.png)
 

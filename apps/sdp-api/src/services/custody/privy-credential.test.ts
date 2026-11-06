@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkPrivyCredential } from "@/services/custody/privy-credential";
+import {
+  assertPrivyCredentialAccepted,
+  checkPrivyCredential,
+} from "@/services/custody/privy-credential";
 
 describe("checkPrivyCredential", () => {
   afterEach(() => {
@@ -42,6 +45,44 @@ describe("checkPrivyCredential", () => {
     );
   });
 
+  it("accepts populated wallet lists with provider metadata", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          data: [
+            { id: "wallet-123", address: "solana-address", chain_type: "solana", policy_ids: [] },
+            { id: "wallet-456", address: "0x1234", chain_type: "ethereum" },
+          ],
+          next_cursor: null,
+        },
+        200
+      )
+    );
+
+    await expect(checkPrivyCredential({}, { appId: "app-123", appSecret: "secret" })).resolves.toBe(
+      "success"
+    );
+  });
+
+  it.each([
+    ["empty wallet", [{}]],
+    ["null wallet", [null]],
+    ["primitive wallet", ["wallet-123"]],
+    ["missing address", [{ id: "wallet-123", chain_type: "solana" }]],
+    ["blank id", [{ id: " ", address: "solana-address", chain_type: "solana" }]],
+    ["invalid chain type", [{ id: "wallet-123", address: "solana-address", chain_type: 1 }]],
+    [
+      "mixed valid and invalid wallets",
+      [{ id: "wallet-123", address: "solana-address", chain_type: "solana" }, {}],
+    ],
+  ])("does not confirm credentials for a %s", async (_case, data) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ data }, 200));
+
+    await expect(checkPrivyCredential({}, { appId: "app-123", appSecret: "secret" })).resolves.toBe(
+      "retry_unknown"
+    );
+  });
+
   it.each([
     ["rate limit", () => jsonResponse({ error: "rate limited" }, 429)],
     ["provider failure", () => jsonResponse({ error: "unavailable" }, 503)],
@@ -60,6 +101,69 @@ describe("checkPrivyCredential", () => {
     await expect(checkPrivyCredential({}, { appId: "app-123", appSecret: "secret" })).resolves.toBe(
       "retry_unknown"
     );
+  });
+
+  it.each([
+    [
+      "failed",
+      "Privy's invalid app credentials code",
+      () => jsonResponse({ code: "missing_or_invalid_privy_app_id" }, 400),
+    ],
+    ["retry_unknown", "another Privy code", () => jsonResponse({ code: "invalid_data" }, 400)],
+    ["retry_unknown", "a body without a code", () => jsonResponse({ error: "bad request" }, 400)],
+    ["retry_unknown", "a non-JSON body", () => new Response("Bad Request", { status: 400 })],
+  ])("classifies a 400 as %s for %s", async (expected, _case, response) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(response());
+
+    await expect(checkPrivyCredential({}, { appId: "app-123", appSecret: "secret" })).resolves.toBe(
+      expected
+    );
+  });
+});
+
+describe("assertPrivyCredentialAccepted", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("resolves when Privy accepts the credentials", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ data: [] }, 200));
+
+    await expect(
+      assertPrivyCredentialAccepted({}, { appId: "app-123", appSecret: "secret" })
+    ).resolves.toBeUndefined();
+  });
+
+  it("refuses credentials Privy rejects as invalid", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "missing_or_invalid_privy_app_id" }, 400)
+    );
+
+    await expect(
+      assertPrivyCredentialAccepted({}, { appId: "app-123", appSecret: "secret" })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+      message:
+        "The provider rejected these credentials. Check the credential fields, then connect again.",
+      details: { reason: "invalid_credentials" },
+    });
+  });
+
+  it.each([
+    ["a provider failure", () => Promise.resolve(jsonResponse({ error: "unavailable" }, 503))],
+    ["a transport failure", () => Promise.reject(new Error("network failure"))],
+  ])("refuses credentials Privy did not confirm after %s", async (_case, outcome) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(outcome);
+
+    await expect(
+      assertPrivyCredentialAccepted({}, { appId: "app-123", appSecret: "secret" })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: "BAD_REQUEST",
+      message: "Privy did not confirm these credentials, so nothing was saved. Try again.",
+      details: { reason: "provider_unconfirmed" },
+    });
   });
 });
 
